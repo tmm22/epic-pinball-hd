@@ -1,0 +1,15 @@
+{
+ "name": "slingshot_left_hit",
+ "table": 1,
+ "frames": 200,
+ "ball": {
+  "x": 110,
+  "y": 290,
+  "xf": 0,
+  "yf": 0,
+  "vx": -250,
+  "vy": 50
+ },
+ "description": "Ball at (110,290) moving left/down into the left slingshot (kicker colours, y>=200).",
+ "inputs": []
+}

@@ -1,0 +1,15 @@
+{
+ "name": "adv_top_edge_clamp",
+ "table": 1,
+ "frames": 60,
+ "ball": {
+  "x": 200,
+  "y": 12,
+  "xf": 0,
+  "yf": 0,
+  "vx": 100,
+  "vy": -1500
+ },
+ "description": "(200,12) moving up at vy=-1500: after an upward move y < 1, so y=3 and vy=0 (cs:1813).",
+ "inputs": []
+}

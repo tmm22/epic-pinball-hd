@@ -1,0 +1,15 @@
+{
+ "name": "adv_near_wrap_low",
+ "table": 1,
+ "frames": 150,
+ "ball": {
+  "x": 175,
+  "y": 207,
+  "xf": 0,
+  "yf": 0,
+  "vx": 105,
+  "vy": -169
+ },
+ "description": "(175,207) with (105,-169): first contact hits [3,2,1] (contains 1 but not 48): no wrap, k=2.",
+ "inputs": []
+}

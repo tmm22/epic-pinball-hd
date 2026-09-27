@@ -1,0 +1,18 @@
+{
+ "name": "adv_plunger_overcharge",
+ "table": 1,
+ "frames": 180,
+ "ball": {
+  "x": 284,
+  "y": 336,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0
+ },
+ "description": "Plunger charge poked to 1990 (above the 700 cap, so holding adds nothing), one frame held, then released: vy=-1990, a 5 px/step run up the dotted 1-px lane walls and round the top at max speed.",
+ "pokes": {
+  "plunger_charge": 1990
+ },
+ "inputs": [4]
+}

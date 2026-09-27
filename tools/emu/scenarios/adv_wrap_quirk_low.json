@@ -1,0 +1,15 @@
+{
+ "name": "adv_wrap_quirk_low",
+ "table": 1,
+ "frames": 150,
+ "ball": {
+  "x": 93,
+  "y": 140,
+  "xf": 0,
+  "yf": 0,
+  "vx": 132,
+  "vy": -377
+ },
+ "description": "(93,140) with (132,-377): first contact hits [48,9..1]; wrap case gives k=48 although the hits centre near k=4.",
+ "inputs": []
+}

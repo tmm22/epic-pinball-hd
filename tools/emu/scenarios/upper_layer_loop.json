@@ -1,0 +1,16 @@
+{
+ "name": "upper_layer_loop",
+ "table": 1,
+ "frames": 250,
+ "ball": {
+  "x": 158,
+  "y": 110,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": -450,
+  "layer": 1
+ },
+ "description": "Ball on the upper level (layer 1, ramp/habitrail) at (158,110) inside the centre loop, moving up (vy=-450): only colours BC..C7 collide, divisors 17+3, no kickers.",
+ "inputs": []
+}

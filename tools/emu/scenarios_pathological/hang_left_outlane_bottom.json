@@ -1,0 +1,15 @@
+{
+ "name": "hang_left_outlane_bottom",
+ "table": 1,
+ "frames": 40,
+ "ball": {
+  "x": 107,
+  "y": 241,
+  "xf": 0,
+  "yf": 0,
+  "vx": -695,
+  "vy": 82
+ },
+ "description": "(107,241) with (-695,82): after 40 steps the ball reaches the bottom of the left outlane at (24..25,383) and the push-out loop alternates k=27 / k=48 (x 24 <-> 25) forever.",
+ "inputs": []
+}

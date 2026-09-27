@@ -1,0 +1,11 @@
+# Copyrighted game data - user-owned, never commit or redistribute
+*.iso
+original/
+extracted/
+scratch/
+.venv/
+__pycache__/
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+.DS_Store

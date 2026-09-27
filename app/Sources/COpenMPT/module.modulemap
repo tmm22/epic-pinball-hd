@@ -1,0 +1,5 @@
+module COpenMPT [system] {
+    header "shim.h"
+    link "openmpt"
+    export *
+}

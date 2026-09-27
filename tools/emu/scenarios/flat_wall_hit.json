@@ -1,0 +1,15 @@
+{
+ "name": "flat_wall_hit",
+ "table": 1,
+ "frames": 120,
+ "ball": {
+  "x": 82,
+  "y": 200,
+  "xf": 0,
+  "yf": 0,
+  "vx": -300,
+  "vy": 0
+ },
+ "description": "Ball at (82,200) moving left (vx=-300) into a vertical wall; first contact k=25 (west).",
+ "inputs": []
+}

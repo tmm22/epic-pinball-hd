@@ -1,0 +1,15 @@
+{
+ "name": "adv_wrap_quirk_split",
+ "table": 1,
+ "frames": 150,
+ "ball": {
+  "x": 118,
+  "y": 298,
+  "xf": 0,
+  "yf": 0,
+  "vx": 391,
+  "vy": 80
+ },
+ "description": "(118,298) with (391,80): first contact hits [48,45,43,42,41,2,1] (gaps in the run), wrap case k=48.",
+ "inputs": []
+}

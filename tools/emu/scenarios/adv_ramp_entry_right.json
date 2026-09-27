@@ -1,0 +1,16 @@
+{
+ "name": "adv_ramp_entry_right",
+ "table": 1,
+ "frames": 125,
+ "ball": {
+  "x": 250,
+  "y": 170,
+  "xf": 0,
+  "yf": 0,
+  "vx": 150,
+  "vy": -450
+ },
+ "description": "Rules mode. (250,170) with (150,-450) into the right ramp entrance: F0 at frame 4, F9 on layer 1, F1 at frame 46 (ball stopped).",
+ "mode": "rules",
+ "inputs": []
+}

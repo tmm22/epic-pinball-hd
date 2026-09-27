@@ -1,0 +1,16 @@
+{
+ "name": "adv_ramp_entry_center",
+ "table": 1,
+ "frames": 74,
+ "ball": {
+  "x": 160,
+  "y": 150,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": -450
+ },
+ "description": "Rules mode. (160,150) straight up into the centre ramp entrance: F0 at frame 3, upper level, F1 at frame 73.  Ends at frame 74, before the saucer sensor F6 (cs:2379, a table rule the port does not run) captures the ball at frame 75.",
+ "mode": "rules",
+ "inputs": []
+}

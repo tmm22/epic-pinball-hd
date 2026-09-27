@@ -1,0 +1,15 @@
+{
+ "name": "multi_bounce_upper",
+ "table": 1,
+ "frames": 300,
+ "ball": {
+  "x": 150,
+  "y": 130,
+  "xf": 0,
+  "yf": 0,
+  "vx": 250,
+  "vy": -350
+ },
+ "description": "Fast ball in the upper playfield, (150,130) with (250,-350): several wall/bumper contacts.",
+ "inputs": []
+}

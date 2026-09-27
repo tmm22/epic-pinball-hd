@@ -1,0 +1,15 @@
+{
+ "name": "diagonal_wall_hit",
+ "table": 1,
+ "frames": 120,
+ "ball": {
+  "x": 166,
+  "y": 164,
+  "xf": 0,
+  "yf": 0,
+  "vx": 250,
+  "vy": -250
+ },
+ "description": "Ball at (166,164) moving up-right (250,-250); first contact k=7 (diagonal normal), no kicker.",
+ "inputs": []
+}

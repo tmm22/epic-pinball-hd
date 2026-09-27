@@ -1,0 +1,15 @@
+{
+ "name": "adv_thin_wall_fast_lane",
+ "table": 1,
+ "frames": 60,
+ "ball": {
+  "x": 284,
+  "y": 150,
+  "xf": 0,
+  "yf": 0,
+  "vx": 2000,
+  "vy": 0
+ },
+ "description": "Ball in the upper plunger lane (284,150) with vx=2000 (capped at 5 px/step, backlog clamped): the first step already overlaps the 1-px outer lane wall at x=300 (hits [41,8], straddle on both arcs); 4 push-out iterations, k=48 via the +24 rule.",
+ "inputs": []
+}

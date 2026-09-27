@@ -1,0 +1,15 @@
+{
+ "name": "adv_thin_wall_fast_straddle",
+ "table": 1,
+ "frames": 150,
+ "ball": {
+  "x": 54,
+  "y": 164,
+  "xf": 0,
+  "yf": 0,
+  "vx": 693,
+  "vy": 97
+ },
+ "description": "(54,164) with (693,97), 5.4 px/step: first contact hits [41,40,39,4,3], i.e. a thin wall inside the box between the upper-right and lower-right arcs; span 38 > 24 gives k=46 (+24 rule), 4 responses.",
+ "inputs": []
+}

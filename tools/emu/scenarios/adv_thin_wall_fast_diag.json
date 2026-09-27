@@ -1,0 +1,15 @@
+{
+ "name": "adv_thin_wall_fast_diag",
+ "table": 1,
+ "frames": 150,
+ "ball": {
+  "x": 185,
+  "y": 254,
+  "xf": 0,
+  "yf": 0,
+  "vx": 1300,
+  "vy": -1519
+ },
+ "description": "(185,254) with (1300,-1519): max-speed diagonal; first contact hits [41,40,3,2,1] (k=45), 3 responses.",
+ "inputs": []
+}

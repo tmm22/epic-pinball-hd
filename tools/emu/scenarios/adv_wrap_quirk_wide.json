@@ -1,0 +1,15 @@
+{
+ "name": "adv_wrap_quirk_wide",
+ "table": 1,
+ "frames": 150,
+ "ball": {
+  "x": 157,
+  "y": 320,
+  "xf": 0,
+  "yf": 0,
+  "vx": 468,
+  "vy": 520
+ },
+ "description": "(157,320) with (468,520): first contact hits 48..31 and 1 (19 probes). min 1 / max 48 is the wrap case, which always yields k=48 although the hits centre near k=40 (collision.md s4 quirk).",
+ "inputs": []
+}

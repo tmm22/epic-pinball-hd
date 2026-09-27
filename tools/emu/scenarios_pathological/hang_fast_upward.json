@@ -1,0 +1,15 @@
+{
+ "name": "hang_fast_upward",
+ "table": 1,
+ "frames": 40,
+ "ball": {
+  "x": 192,
+  "y": 156,
+  "xf": 0,
+  "yf": 0,
+  "vx": -570,
+  "vy": -1916
+ },
+ "description": "(192,156) with (-570,-1916): hangs in frame 4 step 1 on thin wall art.",
+ "inputs": []
+}

@@ -1,0 +1,15 @@
+{
+ "name": "adv_below_limit_reentry",
+ "table": 1,
+ "frames": 120,
+ "ball": {
+  "x": 145,
+  "y": 390,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": -700
+ },
+ "description": "(145,390) below the collision limit (y >= 384: no wall test) moving up at vy=-700 between the resting flippers: collision resumes at y < 384 and the ball flies up the centre.",
+ "inputs": []
+}

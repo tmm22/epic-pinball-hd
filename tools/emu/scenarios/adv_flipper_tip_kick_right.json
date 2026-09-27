@@ -1,0 +1,15 @@
+{
+ "name": "adv_flipper_tip_kick_right",
+ "table": 1,
+ "frames": 150,
+ "ball": {
+  "x": 157,
+  "y": 316,
+  "xf": 0,
+  "yf": 0,
+  "vx": -8,
+  "vy": -9
+ },
+ "description": "(157,316) with (-8,-9), right flipper pressed at frame 36: at frame 37 step 1 the moving right flipper touches the ball on the wrap side (hits [48,3,2,1] -> k=48, flipper_contact 2): the tip-index path (k-1 > 40) adds the tip kick on each of the 9 iterations, v becomes (-638,-1152).",
+ "inputs": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+}

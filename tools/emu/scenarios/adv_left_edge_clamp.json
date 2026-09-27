@@ -1,0 +1,15 @@
+{
+ "name": "adv_left_edge_clamp",
+ "table": 1,
+ "frames": 20,
+ "ball": {
+  "x": 3,
+  "y": 220,
+  "xf": 0,
+  "yf": 0,
+  "vx": -1000,
+  "vy": 0
+ },
+ "description": "(3,220) outside the left wall moving left at vx=-1000: x < 1 is set to 1 every step; the backlog saturates at -1360 after the move.  (Run longer, the ball falls onto wall art out there at frame 24 and the original livelocks in the push-out loop.)",
+ "inputs": []
+}

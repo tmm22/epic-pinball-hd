@@ -1,0 +1,16 @@
+{
+ "name": "adv_ramp_entry_left",
+ "table": 1,
+ "frames": 150,
+ "ball": {
+  "x": 95,
+  "y": 110,
+  "xf": 0,
+  "yf": 0,
+  "vx": -60,
+  "vy": -450
+ },
+ "description": "Rules mode. (95,110) moving up-left into the left ramp entrance (sensor F0, handler cs:206F): layer 0 -> 1 at frame 4 (extra gravity 13), ride on the upper level, exit on F1 (cs:2082) at frame 73 where y >= 200 stops the ball (vx=vy=0).  Also passes F9 on layer 1 (a scoring-only handler).",
+ "mode": "rules",
+ "inputs": []
+}

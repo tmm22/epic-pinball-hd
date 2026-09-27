@@ -1,0 +1,15 @@
+{
+ "name": "bumper_hit",
+ "table": 1,
+ "frames": 200,
+ "ball": {
+  "x": 190,
+  "y": 86,
+  "xf": 0,
+  "yf": 0,
+  "vx": 300,
+  "vy": 0
+ },
+ "description": "Ball at (190,86) moving right (vx=300) into the right-hand pop bumper (colours CF..D2, y<200): kicker response v += 8*n.",
+ "inputs": []
+}
