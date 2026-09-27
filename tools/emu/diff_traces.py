@@ -40,6 +40,10 @@ Outcomes per scenario:
                  that frame (a lockout set by a rule blocks later sensors).  This is a heuristic attribution:
                  it still counts as a failure, and a real port bug inside that window would be mislabelled,
                  so check the named handler (physics mode has no such ambiguity).
+  ORIG_CRASH     (full mode) the original's main loop writes over its own code segment, so it cannot run
+                 on (the real game crashes there too).  Seen when a ball is at x < 0: the ball-background save
+                 (planar VRAM copy, `rep movsb` with a width from x: EP5 cs:378E, EP10 cs:4A50, EP13 cs:46E8)
+                 overruns its buffer.  Passes only if all earlier records are identical.
   HARNESS_ERROR  anything else the harness raised; exit status 1
 Port-only diagnostic keys (loop_guard, divide_faults) are never compared as ordinary fields.
 Exit status 0 iff every scenario passes.
@@ -138,6 +142,11 @@ def diff_one(a, b, use_extra, context, orig_error=None):
             res.update(ok=False)
             lines.append(f'{kind}: the original fails at frame {frame} step {step} (record {n}); the port trace '
                          f'ends after {len(b)} records')
+        elif kind == 'ORIG_CRASH':
+            # Nothing for the port to flag: the original destroyed its own code (no memory model in the port).
+            res.update(ok=True)
+            lines.append(f'ORIG_CRASH: {n} records identical; the original overwrites its own code segment in '
+                         f'frame {frame} (before step {step}) and cannot continue; the port runs on')
         else:
             key = 'loop_guard' if kind == 'ORIG_HANG' else 'divide_faults'
             flagged = bool(b[n].get('extra', {}).get(key))
@@ -312,6 +321,8 @@ def main():
                 a = getattr(e, 'records', [])
                 if isinstance(e, ep_emu.PushoutLivelock):
                     orig_error = ('ORIG_HANG', getattr(e, 'frame', None), getattr(e, 'step', None))
+                elif isinstance(e, ep_emu.CodeOverwritten):
+                    orig_error = ('ORIG_CRASH', getattr(e, 'frame', None), getattr(e, 'step', None))
                 elif 'divide error' in str(e):
                     orig_error = ('ORIG_FAULT', getattr(e, 'frame', None), getattr(e, 'step', None))
                 else:
@@ -320,7 +331,7 @@ def main():
                     continue
             write_jsonl(os.path.join(args.out_dir, f'{name}.orig.jsonl'), a)
             if args.save_golden and s == scn:
-                tail = [] if orig_error is None else [dict(orig_error='hang' if orig_error[0] == 'ORIG_HANG' else 'fault',
+                tail = [] if orig_error is None else [dict(orig_error={'ORIG_HANG': 'hang', 'ORIG_CRASH': 'crash'}.get(orig_error[0], 'fault'),
                                                            frame=orig_error[1], step=orig_error[2])]
                 write_jsonl(os.path.join(args.golden_dir, f'{base}.jsonl'), a + tail)
             try:

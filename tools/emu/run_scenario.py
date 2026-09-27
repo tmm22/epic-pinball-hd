@@ -100,7 +100,20 @@ def run(scn, mode=None, frames=None, sensor_log=None, frame_state=None):
         emu.set_keys(inputs[f] if f < len(inputs) else 0)
         emu.sensor_log = []
         if mode == 'full':
-            emu.main_loop_full()
+            try:
+                emu.main_loop_full()
+            except ep_emu.EmuError as e:
+                if emu.code_intact():
+                    raise
+                err = ep_emu.CodeOverwritten(f'frame {f}: the main loop overwrote the code segment and then failed ({e})')
+                err.records, err.frame, err.step = out, f, 0
+                raise err from e
+            if not emu.code_intact():
+                # render code (save/restore_ball_bg) overran into the code segment: the next physics_step
+                # would run corrupted code (EP10 upper_layer_loop: ball x = -1)
+                err = ep_emu.CodeOverwritten(f'frame {f}: the main loop overwrote the code segment')
+                err.records, err.frame, err.step = out, f, 0
+                raise err
         else:
             emu.main_loop_physics(mode)
         if sensor_log is not None and emu.sensor_log:

@@ -26,6 +26,7 @@ final class HeadlessGameTests: XCTestCase {
         let r = AutoPlay.run(engine: e, frames: frames)
         XCTAssertEqual(r.loopGuardTrips, 0, "EP\(n): push-out loop guard tripped")
         XCTAssertEqual(r.ruleFaults, [], "EP\(n): interpreter faults")
+        XCTAssertEqual(r.ruleWarnings, [], "EP\(n): rule code the port could not run from the EXE")
         XCTAssertGreaterThan(r.frames, 300, "EP\(n): the game ended implausibly early")
         XCTAssertGreaterThan(r.score, 0, "EP\(n): no score in \(r.frames) frames")
         XCTAssertGreaterThan(r.soundEvents, 0, "EP\(n): no sound events")
@@ -50,6 +51,25 @@ final class HeadlessGameTests: XCTestCase {
     func testTable11() throws { try play(11) }
     func testTable12() throws { try play(12) }
     func testTable13() throws { try play(13) }
+
+    /// EP8's palette ring (cs:1281, PaletteCycle) is found in its EXE, in no other table's, and a
+    /// game produces palette overrides for entries 0xA0..0xDF.
+    func testEP8PaletteRing() throws {
+        let e = try engine(8)
+        let pc = try XCTUnwrap(e.rules?.paletteCycle, "EP8 palette rotation not found")
+        XCTAssertEqual(pc.firstIndex, 0xA0)
+        XCTAssertEqual(pc.colours, 64)
+        XCTAssertNotNil(pc.waitRoutine)
+        e.startGame()
+        for _ in 0..<20 { e.runFrame() }
+        let s = e.takePresentation()
+        XCTAssertEqual(s.paletteOverrides.count, 64)
+        XCTAssertEqual(s.paletteOverrides.first?.index, 0xA0)
+        for n in [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13] {
+            guard let o = try? engine(n) else { continue }
+            XCTAssertNil(o.rules?.paletteCycle, "EP\(n) has no palette ring")
+        }
+    }
 
     /// Two players, two balls each: the end-of-turn counters switch players and the game ends after
     /// 2 x 2 balls (EP1 through its endOfTurn glue, EP10 through its automatic hooks).

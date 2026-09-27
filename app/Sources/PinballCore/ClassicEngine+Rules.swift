@@ -140,6 +140,7 @@ extension ClassicEngine: RulesHost {
         case .lamps: r.lampUpdate()
         case .gravity: gravityAndScan()
         case .render: r.renderFrame()
+        case .paletteCycle: r.paletteCycleStep()
         }
     }
 

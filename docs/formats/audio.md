@@ -129,7 +129,7 @@ let audio = try AudioEngine(dataDir: originalDir, table: n)   // loads SFXn.PIN 
 try audio.start()                        // AVAudioEngine + AVAudioSourceNode
 audio.startTableMusic()                  // song n from order 0, unpaused (launcher + table init)
 audio.present(state)                     // per frame: state.soundEvents + state.music
-audio.submit(events: [SoundEvent])       // centred
+audio.submit(events: [SoundEvent])       // with SoundEvent.pan (0...15; -1 = centred)
 audio.submit([SfxCommand(sample:rateHz:sweepPerFrame:sweepFrames:pan:)])  // with pan 0...15
 audio.setMusic(MusicRequest(song:order:)) // song < 0 stops; order < 0 keeps position; loads on demand
 audio.setMusicPaused(true/false)         // the tables' M key
@@ -155,7 +155,8 @@ stereo). An event at game frame f is applied at output sample `floor(f * rate / 
 * Sweeps (`sweepPerFrame`, `sweepFrames`): at each game-frame tick
   (`floor(k * outputRate / 59.94)`) the voice's rate changes by `sweepPerFrame` and its step is
   recomputed, `sweepFrames` times (minimum 1 Hz).
-* Pan: `SoundEvent` has no pan field yet, so events play centred. `SfxCommand.pan` 0..15
+* Pan: `SoundEvent.pan` (0..15 as sfx_play computes it, -1 = centred; filled by the rules
+  runtime) becomes `SfxCommand.pan`. `SfxCommand.pan` 0..15
   uses a balance law (`L = min(1, 2(1-x))`, `R = min(1, 2x)`, `x = pan/15`) [L: the
   driver's pan law was not traced]. `ClassicSoundMap.pan(forBallX:)` gives the original's fallback.
 * Music: one libopenmpt module per song slot (0..31), repeat forever. Paused music outputs silence

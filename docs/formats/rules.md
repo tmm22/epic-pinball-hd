@@ -8,6 +8,12 @@ section 5) runs every lifted handler and hook against the original machine code 
 **0 failures on all 13 tables**. Everything here is static analysis plus emulation of isolated
 routines with Unicorn. The game itself has not been run in DOSBox-X for rules.
 
+**The Swift port runs these rules** (`app/Sources/PinballCore/Rules/`, section 7): rules.json is interpreted against the
+live data segment read from the user's EXE, and the unlifted pieces (EP1's annotated main-loop fragments, the `call`/`asm`
+ops, EP10's two physics-side fragments) are executed from the EXE bytes by a small x86 interpreter (`MiniX86`). Against the
+original code in the emulator harness, rules mode is exact on all 13 tables' scenario sets (emulation.md section 12), and for
+EP1 the whole data segment outside display buffers plus every sfx_play / dmd_message call is identical after every frame.
+
 Confidence tags: **[H]** read from code and confirmed by the differential test,
 **[M]** read from code, meaning inferred (for example what a sensor is physically),
 **[L]** guess.
@@ -168,6 +174,13 @@ reached `hold - 5`.
 | `bonus_multiplier_payout` | cs:33E7..340D | adds `bonus_total` once per multiplier step, then `bonus_mult = 1` |
 | `next_ball_skill` | cs:358E | remembers the score for the no-score rule, picks `skill_lane` from `skill_lane_rng`, blinks its lamp, plays a rising sound |
 
+Also run by the port from the EXE, not lifted (app/Sources/PinballCore/Rules/TableGlue.swift lists every range): the
+flipper_update sound fragments cs:3D1F..3D2B / cs:3DBD..3DC9 (a flipper leaving rest queues its sound with a left/right
+pan and clears the queue delay), the sound block cs:0898..09DC, the serve/release/tilt side effects, dmd_idle_text and the
+end-of-turn player switch. `sound_sweeps[0]` (ds:0AE5, +500 Hz every 32 frames) lists empty `step_id`/`end_id` although
+it plays sound 0x12 (the id is loaded inside the sound block, not by the sweep's own code); the port runs the real code, so
+this is only a schema gap.
+
 Not lifted (display or engine code): the per-player save/restore (cs:3473/353A copies ds:5A6C..5AE0, 116
 bytes, to and from per-player areas via table ds:6571; after a restore, lamp states 5/6 become 1/2 so they are redrawn), the
 bonus-count screen timing, and attract mode.
@@ -281,7 +294,7 @@ JSON values: an integer, or a list `[op, args...]`:
 | `sound_sweep_start` | `sweep`, `active`, `step_id`, `end_id` | start (active=1) or stop a sweep (`sound_sweeps`) |
 | `sound_play` | `id` | direct play (not used by EP1 rules) |
 | `message` | `msg`, `pos{x,y,raw}`, `mode` | dot-matrix message: `msg` = DS string offset; `mode` AH = font/centring (3+ = not centred), AL = effect [M] |
-| `text` | `msg`, `pos`, `routine` | score-strip text (two routines, normal/highlight) |
+| `text` | `msg`, `pos`, `routine` | a text line appended to the active dot message: draw_text (EP1 cs:59AC, font5) and draw_text_hi (cs:5926, font8) check and advance the message's line pointer [0x50C]. Not score-strip text (runtime-confirmed with DOSBox-X captures) |
 | `number_text` | `value`, `buf` | format dword `value` as decimal into DS buffer `buf` (10 chars, space padded). **The app must write the digits** because later `text` ops print the buffer |
 | `score_refresh`, `display` | | redraw hints |
 | `pixels` | `val`, `xy` / `outside_playfield` | collision-buffer writes (diverters). `val` may depend on registers |
@@ -292,7 +305,7 @@ JSON values: an integer, or a list `[op, args...]`:
 | `push`/`pop`/`push_all`/`pop_all` | | a per-invocation stack (discarded on return) |
 | `gosub` | `entry` | run another block graph until `return`, then continue. It may leave `cf` set |
 | `call_hook` | `hook` | run a hook |
-| `asm` / `call` | `ip`, `text` / `target` | not liftable (none in EP1, EP2 or EP10) |
+| `asm` / `call` | `ip`, `text` / `target` | not liftable (none in EP1, EP2 or EP10; EP6, EP8, EP9 have a few, section 4.4 item 8). The Swift port executes the target (or, for a graph with `asm`, the whole handler) from the EXE |
 
 `end` of a block: `{"goto": L}`, `{"if": {"cmp", "a", "b", "w"}, "then": L, "else": L}` with `cmp` in `eq ne ult ule ugt uge slt sle
 sgt sge` compared at width `w`, or `{"return": true}`. `L` may be `@return`. Conditions are evaluated **after** all ops of
@@ -411,6 +424,24 @@ flipper key flag), `lamp_timer` (a countdown that writes lamp slots), `main` (an
   6-target bank bitmask check). Rule **subroutines** (cs:2C6D returns its result in the carry flag, `stc`/`clc`; cs:2CF1 advances
   a 10-step lamp ladder) are lifted as `gosub` + `cf`.
 
+* **EP10 main-loop fragments outside the harness's physics ranges** (run by the port as TableGlue `preFrame` /
+  `postTimers`): cs:053E..0566 steers ball 0 near the top (when -5 < vy < 5 and y < 200: vx += 2, then vx -= 4 if x >= 145, so a net -2 on the right);
+  cs:0571..05D2 is the top gate: cs:4313 draws the pixel list at ds:062C closed or open according to ds:062B, with ds:00C2
+  and the ds:046C/046B countdown.
+* **EP6 / EP9 ball-position gates** (physics, emulation.md section 10): EP6 cs:0979..0990 closes a one-way gate (32 pixels at
+  ds:6BCC, value 0xEC, via cs:3BD4) once ball 0 has x <= 0xE6; only ball_lost_fade reopens it. EP9 cs:0550..0577 opens or
+  closes 14 pixels at ds:04FE (0xFA or 0xC0, via cs:4091) by ball 0's x. EP9's rule timer cs:058B..05C2 ([3F1E], set to 120
+  by cs:241A) swaps the bottom-half lists ds:051C/053E between 0xFA and 0x01. engine.json `gates` and TableGlue `ruleTimers`.
+* **EP8 rule-driven main-loop code** (TableGlue `ruleTimers` / `preGravity`): the magnet cs:05D4 (while [0454]==1 ball 0
+  within 60 px of ([0456],[0458]) is pulled by d*[0460]/max(d.d,20)), the ball transport and level switch cs:06B2..0843
+  ([04A4]/[04A3]/[04AA], wall threshold [04A7] EB/FF, scan bounds [04A6]/[04A9]) and the lamp-driven toy shapes cs:1095..10A9
+  (cs:429E draws or clears each lamp's collision shape). **Palette ring** [H]: cs:1281, called once per main-loop frame
+  (cs:0843) and from the frame wait cs:0240, counts [04A5] up to the speed byte [5D0C] (4 at boot; 3/1/2 set by handlers
+  cs:2329/262B/2AF4), then writes palette entries 0xA0..0xDF from the working palette ds:5138 (6-bit) and rotates those 64
+  colours by one. cs:3613 reloads the ring from one of four colour sets (table ds:525C, by [5D07]) at level changes and ball
+  end. DOSBox-X captures (frames 240 and 600) match a pure rotation of base >> 2 on 54 of 64 indices (the rest are covered);
+  later frames show a reloaded set. The port emits the ring as `PresentationState.paletteOverrides` (PaletteCycle.swift).
+  [M]: the ring's rotation phase after the intro is not reproduced (the original rotates it during its intro fade).
 * **All tables**: the hook discovery finds a `frame_counters` hook in all 12. It finds a `drain` hook in EP2, EP4, EP7, EP8 and
   EP10-13; in EP3, EP5, EP6 and EP9 the drain fragment writes nothing that counts as rule state, so there is no drain hook. It
   finds an extra-gravity `frame_timers` hook in EP9-13 (the tables with an extra-gravity term) and a `flipper_press` hook (EP1's
@@ -436,10 +467,13 @@ flipper key flag), `lamp_timer` (a countdown that writes lamp slots), `main` (an
 7. Flag-dependent branches the lifter cannot model produce `["flags"]` conditions. The one case in the 13 tables, EP8's kicker
    (cs:1b20 `jne` after a join of two compare paths), is now resolved (section 4.2); none remain. `jb/jae` after `inc/dec`
    (CF unchanged) would still hit this.
-8. **Not expressible, left as `asm`/`call` ops** (`coverage.unexpressed`): EP6 cs:31e1 (1 call; not rule-like), EP8 cs:3613
-   (3 calls; copies with `rep movs` into DS), and EP9 handler h29c6 (22 ops: `out` port writes and writes through a non-DS
-   segment, a palette/display effect [M]). The verifier cannot run h29c6 (every trial is skipped); everything else in these
-   tables runs. EP5's end-of-ball region cs:1f4a was dropped because an `adc` there has no preceding `add` to pair with.
+8. **Not expressible, left as `asm`/`call` ops** (`coverage.unexpressed`): EP6 cs:31e1 (1 call; the ball-number and score
+   panel: far text calls cs:4FCA, score_refresh cs:416B), EP8 cs:3613 (3 calls; copies with `rep movs` into DS, the palette
+   ring reload) and cs:0240 (the frame wait, used as a delay in a light show), and EP9 handler h29c6 (22 ops: `out` port writes
+   and writes through a non-DS segment into the collision buffer, 2x2 blocks at top-half 0x47BD / 0x4F44). The verifier cannot
+   run h29c6 (every trial is skipped); everything else in these tables runs. The Swift port runs all of them from the EXE
+   (MiniX86): display routines (DS switched to a constant segment, or ES = A000h) are skipped, unknown near calls inside a
+   `call` are followed (EP10-13 cs:358A-style num_to_text), and the EP8 palette routines are handled natively. EP5's end-of-ball region cs:1f4a was dropped because an `adc` there has no preceding `add` to pair with.
 
 ## 5. Verification
 
@@ -488,7 +522,24 @@ compared. Some automatic hooks are display-side code (section 4.4 item 1): they 
 
 * Name EP2-EP13 state and hooks (the automatic hooks give entry/stop and a shape label only). Reproduce EP1's end-of-ball
   split (section 4.1 differs at the cut points).
-* EP9 h29c6 (port and segment writes) and EP8 cs:3613 (`rep movs` into DS) need an op or an engine-side implementation.
-* Trace `message.mode` (the effect byte, ds:0B3A) and the text-routine positions to place messages exactly.
+* EP9 h29c6 (port and segment writes) and EP8 cs:3613 (`rep movs` into DS) still have no op; the port executes them from the
+  EXE (section 4.4 item 8), which is exact in every harness scenario but not a schema-level description.
+* The per-frame data-segment check (RulesLiveTests) is EP1-only; the other tables are checked on ball traces (emulation.md 12).
+* EP2-EP13 boot: the port starts the data segment from the EXE image plus the command-line options; the intro/boot tail
+  that EP1's TableGlue `init` runs is not annotated for the others (visible only as the attract text state and EP8's palette
+  phase).
+* Message effects (render_frame's per-dot animation, fades) are decoded for timing only; the renderer shows static dots.
 * Runtime check in DOSBox-X: break on cs:1E6A (dispatch) and cs:19C1 (kicker) and compare with `verify_ir.py` traces.
-* EP8's layered toys (lamp overlays switched by rules) need its rules lifted to decide what is solid when.
+
+## 7. The Swift port's interpreter (`app/Sources/PinballCore/Rules/`)
+
+* `RulesProgram` loads rules.json; `RulesMachine` interprets the block graphs over the 64 KB data-segment window read from the
+  user's EXE, with every engine-owned byte bound to `ClassicEngine` (partial writes included) and shift counts taken mod 32.
+* `MiniX86` executes unlifted code from the EXE (the `call`/`asm` ops, TableGlue ranges); an unknown call outside a rule
+  `call`, an unsupported instruction or a jump out of range stops it and is reported, never guessed.
+* `RulesRuntime` does sensor dispatch (cs:1E3B semantics, jump table read from the EXE, per-ball lockout for EP9-13), the
+  kicker hook, the main-loop schedule (EP1: annotated order; EP2-13: `every_frame` hooks in entry order interleaved with the
+  engine's pieces at their `found_at` ips), end of ball (`ball_end` hooks following `continues`, then the end-of-turn
+  counters), lamp_update, render_frame's message counter, sfx_play -> `SoundEvent`, the EP8 palette ring, and fills
+  `PresentationState` (mapping in the comment block on `RulesRuntime`).
+* `PaletteCycle` (EP8 cs:1281) and `TableGlue` hold the only per-table code knowledge, as addresses or code signatures.

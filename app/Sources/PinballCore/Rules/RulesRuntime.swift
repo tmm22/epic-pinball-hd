@@ -109,6 +109,14 @@ public final class RulesRuntime {
     private var nativeEntries: Set<Int> = []
     /// Where sensor handlers jump when done (engine.json sensors.exit_ip / the dispatcher's tail).
     public var dispatcherExitIP: Int?
+    /// The table's main-loop palette rotation (EP8 cs:1281), if it has one.
+    public let paletteCycle: PaletteCycle?
+    /// DAC entries the palette rotation wrote last (6-bit; `paletteCycle.firstIndex`...), nil = the
+    /// base palette is shown.
+    private var dacRing: [UInt8]?
+    /// > 0 while a rule-code `call` op runs from the EXE: unknown near calls in there are followed
+    /// (MiniX86 still stops at anything outside its subset: port I/O, ES outside DS/playfield).
+    private var nativeDepth = 0
 
     // MARK: - loading
 
@@ -164,6 +172,7 @@ public final class RulesRuntime {
         machine = try RulesMachine(program: program, exe: exe)
         glue = TableGlue.make(program: program, machine: machine)
         x86 = MiniX86(machine: machine)
+        paletteCycle = PaletteCycle.find(code: machine.code)
         lampDrawn = [UInt8](repeating: 0, count: max(program.lampCount, program.lampSlotCount))
         warnings += glue.warnings
         for h in program.hooks.values { hookByIP[h.entryIP] = h.entry }
@@ -217,8 +226,15 @@ public final class RulesRuntime {
 
     /// An unlifted near call from rule code, executed from the EXE with the caller's registers.
     func nativeCall(target: Int, from ip: Int, registers regs: inout [String: UInt16]) -> Bool {
+        if let pc = paletteCycle, target == pc.routine || target == pc.waitRoutine {
+            // EP8 cs:0240 (frame wait: rotation, cs:3C0F flash effect, vsync) used as a delay: the
+            // rotation is the rule-visible part; the flash is display only.
+            paletteCycleStep()
+            return true
+        }
         let saved = x86.r, savedES = x86.es
-        defer { x86.r = saved; x86.es = savedES }
+        nativeDepth += 1
+        defer { x86.r = saved; x86.es = savedES; nativeDepth -= 1 }
         x86.resetRegisters()
         x86.r[4] = saved[4] == 0 ? MiniX86.initialSP : saved[4] &- 0x100
         let idx = ["ax": 0, "cx": 1, "dx": 2, "bx": 3, "bp": 5, "si": 6, "di": 7]
@@ -372,6 +388,8 @@ public final class RulesRuntime {
     /// the boot tail (glue `init`). Called by `Scenario.apply` / game start after the engine reset.
     public func boot() {
         machine.reset()
+        paletteCycle?.bootRing(machine)   // the boot fade-in leaves the ring at base >> 2
+        dacRing = nil
         gameOver = false
         message = nil
         localCounter = 0
@@ -401,7 +419,7 @@ public final class RulesRuntime {
 
     public enum MainLoopItem: Equatable, Sendable {
         case hook(String), glue(String)
-        case decay, gates, sound, counters, drain, lane, nudge, lamps, gravity, render
+        case decay, gates, sound, counters, drain, lane, nudge, lamps, gravity, render, paletteCycle
     }
     private var cachedSchedule: [MainLoopItem]?
 
@@ -439,6 +457,9 @@ public final class RulesRuntime {
         items.append((gravIP, -1, .lamps))
         items.append((gravIP, 0, .gravity))
         items.append((0x10000, 0, .render))
+        // The main loop's call (EP8 cs:0843; its intro loop's call cs:0435 lies before the first hook).
+        let loopStart = every.map(\.entryIP).min() ?? 0
+        for s in paletteCycle?.callSites ?? [] where s >= loopStart { items.append((s, 0, .paletteCycle)) }
         let s = items.sorted { ($0.0, $0.1) < ($1.0, $1.1) }.map(\.2)
         cachedSchedule = s
         return s
@@ -603,6 +624,11 @@ public final class RulesRuntime {
         lampUpdate(phaseAddr: phase)
     }
 
+    /// One call of the palette rotation (EP8 main loop cs:0843 `call 1281`).
+    public func paletteCycleStep() {
+        if let pc = paletteCycle, let d = pc.step(machine) { dacRing = d }
+    }
+
     /// render_frame's message counter (EP1 cs:3E35..3E4D and the per-effect blocks, cs:43C5): advance,
     /// play the effect's sounds, end the message.
     public func renderFrame() {
@@ -693,7 +719,10 @@ public final class RulesRuntime {
                      "raster_bar", "restore_ball_bg", "save_ball_bg", "camera_update", "blit_list", "render_frame"] where r[name] == target {
             return .handled
         }
+        if let pc = paletteCycle, target == pc.routine || target == pc.waitRoutine { paletteCycleStep(); return .handled }
         if isDisplayRoutine(target) { return .handled }
+        // Inside a rule-code `call` (EP10 cs:341B -> cs:358A num_to_text): execute the callee.
+        if nativeDepth > 0, farSeg == nil { return .follow }
         return .unknown
     }
 
@@ -706,7 +735,7 @@ public final class RulesRuntime {
         if let v = displayRoutineCache[t] { return v }
         let c = machine.code
         var ip = t, lastImm: (reg: Int, v: Int)?, result = false
-        for _ in 0..<10 {
+        for _ in 0..<16 {   // EP6 cs:4FCA: 8 pushes and 2 register moves before `mov ds, ax`
             let op = Int(c[ip & 0xFFFF])
             if (0xB8...0xBF).contains(op) {
                 let v = Int(c[(ip + 1) & 0xFFFF]) | Int(c[(ip + 2) & 0xFFFF]) << 8
@@ -715,6 +744,11 @@ public final class RulesRuntime {
             } else if op == 0x8E, let li = lastImm {
                 let m = Int(c[(ip + 1) & 0xFFFF])
                 if m >> 6 == 3, m & 7 == li.reg, (m >> 3) & 7 == 3, li.v != Int(x86.dsValue) { result = true; break }
+            } else if op == 0x8B || op == 0x8C || op == 0x89, Int(c[(ip + 1) & 0xFFFF]) >> 6 == 3 {
+                // register-register move (EP6 cs:4FCA mov cx,di; mov ax,ds): drops a tracked constant
+                let m = Int(c[(ip + 1) & 0xFFFF])
+                let dst = op == 0x8B ? (m >> 3) & 7 : m & 7
+                if lastImm?.reg == dst { lastImm = nil }
             } else if ![0xFC, 0x1E, 0x06, 0x60, 0x50, 0x51, 0x52, 0x53, 0x55, 0x56, 0x57].contains(op) {
                 if op != 0x8E { break }
             }
@@ -904,6 +938,15 @@ public final class RulesRuntime {
         }
         state.soundEvents = pendingSounds
         state.texts = pendingTexts
+        if let pc = paletteCycle, let d = dacRing {
+            // 6-bit DAC values -> 8-bit (v << 2 | v >> 4), for the renderer's palette pass.
+            func c(_ v: UInt8) -> UInt8 { let x = v & 0x3F; return x << 2 | x >> 4 }
+            state.paletteOverrides = (0..<pc.colours).compactMap { k in
+                let i = pc.firstIndex + k
+                guard i < 256 else { return nil }
+                return PaletteOverride(index: UInt8(i), r: c(d[3 * k]), g: c(d[3 * k + 1]), b: c(d[3 * k + 2]))
+            }
+        }
         state.gameOver = gameOver
         state.music = nil
         pendingSounds.removeAll(keepingCapacity: true)

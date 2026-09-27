@@ -10,6 +10,6 @@
   "vx": 138,
   "vy": 208
  },
- "description": "Ball aimed with v=(138,208) from (152,114) onto the upper_right flipper held up from frame 0: first contact frame 1, k=43.",
+ "description": "Ball aimed with v=(138,208) from (152,114) onto the upper_right flipper held up from frame 0: first contact frame 1, k=43; the flipper is still moving up at that contact (a moving-flipper hit, not a raised-flipper rest; extra/x_upper_right_flipper_raised covers the raised case).",
  "inputs": [2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2]
 }

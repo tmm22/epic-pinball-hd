@@ -300,7 +300,10 @@ def flippers(t, S):
             f2 = t.first_response(steps)
             S[f'fall_{nm}_flipper_held'] = dict(
                 held, description=f'{how} from ({bx},{by}) onto the {nm} flipper held up from frame 0'
-                                  + (f': first contact frame {f2[0]}, k={f2[3]["k"]}.' if f2 else '.'))
+                                  + (f': first contact frame {f2[0]}, k={f2[3]["k"]}' if f2 else '')
+                                  # EP12 upper_right: the ball arrives while the flipper is still rising
+                                  + ('; the flipper is still moving up at that contact (a moving-flipper hit, '
+                                     'not a raised-flipper rest)' if f2 and f2[3].get('flipper_contact') else '') + '.')
         # shot: press just before the landing frame, so the flipper hits the ball while moving
         for d in (3, 2, 4, 1, 5, 6, 0):
             p = land - d

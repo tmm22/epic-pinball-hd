@@ -7,22 +7,18 @@ tables (probe ring, normal and push-out tables, parameter block, flipper outline
 loaded at runtime from `extracted/` files that you produce from your own CD.
 
 Status:
-* **Classic physics is bit-exact for EP1.** In every trace compared against the original
-  EP1 code (run by the emulator harness `tools/emu/`), the ball position, sub-pixel
-  accumulators, velocity, contact direction and flipper angles match on every physics step
-  (see [Verification](#verification)).
-* The other 12 tables run on the same engine with their own constants. Those constants
-  come from the same code patterns, and fields that could not be located are listed in
-  each `engine.json`'s `fallbacks`. Only EP1 has been checked against the original.
-* Table rules (scoring, lamps, captures, kickbacks, gates, multiball) are not ported yet.
-  Only sensor handlers that touch nothing but physics state are run: ramp enter/leave,
-  one-way gates and debounce.
-* **Classic presentation**: the original 320x240 Mode X screen (scrolling playfield window
-  above the VGA split line, display strip below it, Enter slides it away), lamp overlays,
-  flipper/plunger records, big score digits, strip text and dot-matrix messages, all driven
-  by `PresentationState`. Against DOSBox-X captures of the running game, whole EP1 frames
-  (window, lamps, message, strip, ball, plunger) and the EP10 strip match pixel for pixel
-  (see [Classic presentation](#classic-presentation)).
+* **Every table plays a full game**: the original engine (integer-exact physics), the table's own rules
+  (lifted to `rules.json` by `tools/rules.py`, plus the unlifted pieces executed from your EXE), the original
+  320x240 presentation (lamps, strip, score, dot messages, EP8's palette ring) and audio (SFXn.PIN effects at
+  the original's live pitch, SONGn.PSM music through libopenmpt), at the original's 59.94 frames/s.
+* **Checked against the original machine code** (the Unicorn harness in `tools/emu/`, which boots your own
+  EPn.EXE): 415 scenarios over all 13 tables, each in physics, rules and full mode. 1,243 of the 1,245 runs are
+  identical record for record, or identical up to where the original itself hangs or crashes; the 2 others are
+  harness errors in EP8's synthetic two-ball starts in full mode (see [Verification](#verification)). For EP1 the
+  whole data segment and every sound/message call also match after every frame (RulesLiveTests).
+* **Classic presentation** matches DOSBox-X captures of the running game pixel for pixel on whole EP1 frames
+  and the EP10 strip (see [Classic presentation](#classic-presentation)).
+* What is not exact or not checked is listed under [Known limitations](#known-limitations).
 
 ## Requirements
 
@@ -137,16 +133,33 @@ error that names the exact file. A missing `engine.json` tells you to run the ex
 | --- | --- |
 | Left Shift / Left arrow, Right Shift / Right arrow | left / right flipper |
 | Space | plunger while the ball is in the lane, nudge elsewhere |
-| Ctrl | plunger |
+| Ctrl | plunger (the original's Space/Ctrl; Enter is the strip key there, cs:0E9D) |
 | Z or `,` / `/` | nudge (vx +20 / -20 on the next contact); too many nudges = TILT |
 | Up / Down | scroll the camera manually |
 | Enter | slide the display strip out / in (1 row per frame, like the split line) |
+| P | pause (music paused, pause banner) |
+| M | music on / off (the tables' M key: MASI pause/resume) |
+| S | sound effects on / off (the original's opt_sfx: new effects are dropped) |
+| `-` / `=` | master volume down / up; `[` / `]` music volume |
+| R | new game with the rules (a new ball without them); after game over the frame loop waits for R |
 | Tab | full table (320x400) or the 320x240 screen |
 | F | cycle the upscale filter (nearest, xbrz-like, crt) |
 | A | pixel aspect: square or VGA (1.2x tall pixels, 4:3) |
 | E | classic or enhanced presentation |
-| R | new ball at the plunger |
 | Esc, Cmd-Q | quit |
+
+### The game loop (window)
+
+`GameSimulation` turns display-link time into whole original frames at the table's `timing.frameHz`
+(59.94 Hz, at most 0.1 s of catch-up per display frame). Each frame runs the full main loop in the original's
+order (`ClassicEngine.rulesFrameLogic`: rule hooks and timers, sound block, drain/serve, plunger, nudge/tilt,
+gravity and sensor scan, render_frame's message counter) and then 3 physics steps. After every frame the
+controller takes that frame's `PresentationState` and hands it to the renderer (lamps, strip, messages, palette
+overrides) and to `AudioController` -> `PinballAudio.AudioEngine.present(_:)` (every frame's sound events in
+order). Audio: `AudioEngine(dataDir: OriginalDataLocator.resolve(), table: n)`, `start()`,
+`startTableMusic()` (the launcher's SONGn, resumed after the table's fade-in). `--mute` disables audio,
+`--no-music` / `--no-sfx` start with music paused / effects off, `--volume V` sets the master volume.
+Game over freezes the frames (the original enters its menu there) until R.
 
 ## Layout
 
@@ -174,9 +187,22 @@ Sources/PinballRender/      Metal (no AppKit)
 Sources/EpicPinball/        AppKit front end: main.swift, Options.swift, App.swift,
                             Snapshot.swift, TraceMode.swift, Presentation.swift (original camera,
                             strip slide, message resolution, demo driver)
-Tests/PinballCoreTests/     EngineTests (reflection goldens, directions, integration,
-                            flippers, behaviour, decoding, traces), EngineFixture (synthetic
-                            engine.json), RenderTests, AssetTests, CameraTests
+  Rules/                    the table rules: RulesProgram (rules.json), RulesMachine (block-graph
+                            interpreter over the EXE's data segment, engine bytes bound to ClassicEngine),
+                            MiniX86 (runs unlifted EXE code), TableGlue (EP1 fragment addresses, signatures),
+                            RulesRuntime (dispatch, hooks, main-loop schedule, end of ball, sounds, messages,
+                            PresentationState), PaletteCycle (EP8 palette ring)
+  ClassicEngine+Rules.swift the full-mode main loop in the original's order; startGame
+  AutoPlayer.swift          simple plunge-and-flip player (--autoplay, --autopilot, tests)
+  Presentation/PresentationState.swift   the shared producer/consumer contract
+Sources/PinballAudio/       AVAudioEngine: SFXn.PIN effects (4 voices, live pitch), SONGn.PSM via libopenmpt,
+                            AudioEngine.present(PresentationState) (docs/formats/audio.md)
+Tests/PinballCoreTests/     EngineTests (reflection goldens, directions, integration, flippers, behaviour,
+                            decoding, traces), EngineFixture / RulesFixture (synthetic data), Rules*Tests,
+                            MiniX86Tests, DifferentialTests / RulesLiveTests (vs the original, live),
+                            HeadlessGameTests (a full game on every table), PresentationUnitTests (dot text,
+                            composer, strip scan, palette ring), RenderTests, AssetTests, CameraTests
+Tests/PinballAudioTests/    bank/module loading, voice allocation, offline rendering
 ```
 
 ## The classic engine (EP1 addresses; see docs/formats/engine.md, collision.md)
@@ -279,8 +305,8 @@ rounding):
 
 ## Verification
 
-The ground truth is the **original EP1 machine code**, executed from your own
-`original/EP1.EXE` by the Unicorn harness in `tools/emu/` (docs/formats/emulation.md).
+The ground truth is the **original machine code** of each table, executed from your own
+`original/EPn.EXE` by the Unicorn harness in `tools/emu/` (docs/formats/emulation.md).
 
 ### Differential test: `tools/emu/diff_traces.py`
 
@@ -332,17 +358,19 @@ Scenarios (`tools/emu/make_scenarios.py` writes them):
 A deliberately broken wrap rule (`al >>= 2`) makes 24 scenarios diverge and both hang checks
 fail, in the tool and in the tests alike, so both checks catch this kind of regression.
 
-### Results (EP1)
+### Results (all tables)
 
-* Physics mode (the contract): **43 of 43 scenarios identical** on every field of every record,
-  `extra` included. The 2 pathological scenarios match up to the step where the original hangs,
-  and the port flags its loop guard in that same step.
-* Earlier random runs (`scratch/port/fuzz.py`, `fuzz_extra.py`): all identical except the runs in
-  which the original itself livelocks.
-* Rules/full mode: 36 of 43 identical. The 7 others all diverge right after a table rule the port
-  does not have yet: the saucer capture 0xF6 (cs:2379), the outlane kickback 0xF8 (cs:2869),
-  0xF5 (cs:21BD), and the ramp-scoring rule 0xF9 (cs:2AB8). 0xF9 sets `event_lockout = 35`,
-  which delays the ported F1 ramp exit.
+`.venv/bin/python tools/emu/run_suite.py --modes physics,rules,full` (all 13 tables, 415 scenarios, about 5 minutes):
+
+| mode | exact or passing | notes |
+|---|---|---|
+| physics | 415/415 | EP1's pathological starts: the original livelocks, the port flags its loop guard in the same step |
+| rules | 415/415 | sensor dispatch, handlers, kicker hook and rule-driven main-loop code on every table |
+| full | 413/415 | 3 ORIG_CRASH passes (a ball at x < 0 makes the original overwrite its own code); 2 EP8 two-ball harness errors |
+
+Per table and per set: docs/formats/README.md ("Differential results"). For EP1, RulesLiveTests additionally compares
+the whole data segment (outside display buffers) and every sfx_play / dmd_message call after every frame: identical.
+
 * **The original can hang.** The push-out loop (cs:1826..18FA) has no iteration cap. A ball
   that hits 1-px wall art at about 4.5 px/step or more can end up straddling it, and the loop
   then alternates between two k values forever. This happens inside the timer ISR with
@@ -350,23 +378,22 @@ fail, in the tool and in the tests alike, so both checks catch this kind of regr
   freezes. Random fast starts reach this state quite often (9 of 150 fuzz runs). In 40 simulated
   games (120,000 frames) of plunging and flipping, it never happened. The port stops the loop
   after 10,000 iterations (`maxResponseIterations`) and counts `loopGuardTrips`.
+* **The original can crash** when a ball reaches x < 0 (a push-out at the left edge, x = -1 in EP10/EP13): the next
+  frame's ball-background save copies a width computed from x and overwrites the table's code (EP10 cs:4A50). The port has
+  no memory to corrupt and plays on.
 
 The older `scratch/port/run_all.sh` and `diff_traces.py` from the port track still work, but
 `tools/emu/diff_traces.py` replaces them.
 
 ## Known limitations
 
-- Table rules are not ported (see above), so no score, lamps, ball locks, kickbacks or
-  runtime gates (EP1 cs:4488 left outlane gate).
-- Only EP1 has been verified against the original. EP8 has no plunger code (ENIGMA), so
-  its plunger and serve values are EP1 fallbacks. EP2, EP5 and EP9-13 fall back for the
-  kicker cooldown. The `fallbacks` list in each `engine.json` has the details.
-- EP7/EP8 conditional colour classes and EP2's conditional kicker are treated as plain
-  walls/kickers.
-- Demo/attract mode (auto-flip, stuck-ball nudge) is not modelled.
-- Presentation: message effects (AL: dots flying off, fades, colour cycling; render_frame
-  cs:3E35-4373) are not animated, the dots stay put until the message ends. EP9-13 message
-  colours come from a DS byte the rules do not report yet (the table's most common value is
-  used). Lamps: `PresentationState.lamps` cannot say "not drawn yet"; the app reads the rules
-  runtime's `lampDrawn` directly for that. EP8's per-level toy sets and palette cycling are
-  up to the producer of `PresentationState`.
+- EP2-EP13 are checked against the original on ball traces only (the per-frame data-segment check is EP1's), and their
+  boot starts from the EXE image without the intro/boot tail (attract text state, EP8's palette phase).
+- Rule code the lift cannot express (EP6 cs:31E1, EP8 cs:3613/0240, EP9 h29c6) runs from the EXE in `MiniX86`; display
+  routines inside it are skipped.
+- Demo/attract mode (auto-flip, stuck-ball nudge), the PC-speaker sound path, the F1 parameter editor and the launcher
+  are not ported.
+- Presentation: message effects (AL: dots flying off, fades, colour cycling; render_frame cs:3E35-4373) are timed but
+  not animated. EP9-13 message colours come from a DS byte the rules do not report yet (the table's most common value is
+  used). Palette fades are not shown; EP8's palette ring is (PaletteOverride for 0xA0..0xDF). EP8's robot set is not drawn.
+- The window's manual scroll (Up/Down) is simplified: 4 px per frame while held, back to follow on release.

@@ -92,13 +92,24 @@ per-level variable, `[0x5f35]-1`.
   Both routines lower-case-fold by subtracting 0x20 from codes above 0x60. **H** for the mechanism.
   Which messages use which font was not checked.
 
-### 2.5 Display strip (M)
+### 2.5 Display strip (H: confirmed at runtime against DOSBox-X captures)
 Mode X runs at **320x240** (misc output `0xE3` at `cs:460d`). The CRTC line-compare register is
 set to scanline 441 in EP1-8 and 421 in EP9-13. VRAM rows 0..19 (EP1-8, page offset `0x640`)
 or 0..29 (EP9-13, offset `0x960`) hold the score/message strip, and the two scrolling playfield
 pages start after it (`0x640` and `0x8340`, which is `+0x7d00`). By VGA split-screen rules the
-strip shows **below** the split line, i.e. at the bottom of the screen. This was not confirmed at runtime.
-The strip is cleared to colour 0x2f (`cs:5c23`, `5c58`).
+strip shows **below** the split line, at the bottom of the screen. The strip is cleared to colour 0x2f (`cs:5c23`, `5c58`).
+
+Runtime-confirmed (the DOSBox-X captures in `scratch/present/frames`, compared pixel for pixel with the port's
+`ClassicComposer`, app/README.md "Classic presentation"):
+* The strip is at the bottom; the playfield window has **221 rows (EP1-8) / 211 rows (EP9-13)**.
+* `camera_max` is 298 / 279 in EP1 and 303 / 273 in EP10 (strip shown / hidden; Enter moves the split 2 scanlines per frame).
+* EP9-13 have a **dot-display strip**: cleared to one colour (EP10 `cs:5023`, 0xAE over 29 rows), the idle text in small dots
+  and the score as font8 dots at DI 0x447 (EP10 `cs:3483`). Their dot colour comes from a DS byte set before each call
+  (EP10 ds:00C5; `PresentationState.MessageRef.colour`).
+* EP5's score shows only the last 6 digits (`cs:3f12`).
+* `dmd_message` with AH=2 is a no-op in EP1-8 (`cs:5925` is a bare `retf`); in EP9-13 it selects the 4-column font5b.
+* EP8 rotates palette entries 0xA0..0xDF (a 64-colour ring in its working palette, ds:5138) from the main loop
+  (`cs:0843 call 1281`); see rules.md 4.3. Other palette entries are static apart from fades.
 
 ## 3. Sprite groups and how the code uses them
 

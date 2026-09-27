@@ -379,8 +379,14 @@ Notes on the variants, all [H] from the code and exercised by the harness:
   with **vx = 2**.
 * **EP9-EP13** keep one sensor lockout per ball (the gravity loop copies `[di+ARR]` into the lockout before the scan) and have
   no sensor cooldown.
-* **Flipper-kick y gates** (EP4, EP8-13): a flipper contact with ball y < 300 takes the plain wall path, so the upper flippers
-  reflect like walls. The top kick also needs y >= 310 in EP4, EP8, EP11-13.
+* **Flipper-kick y gates** (EP4, EP8-13): a flipper contact with ball y < 300 skips the side/tip kick and gets the normal
+  1 px push-out (every iteration; EP12 cs:19C3 -> 1A29..1A38). On the first response it then takes the EP1 top kick (EP9,
+  EP10: no second gate) or, below the second gate y < 310 (EP4, EP8, EP11-13), the **upper-flipper kick**: if vy > 0 then
+  vy = 0; y += 1; x -= 1 (right) / += 1 (left); vx -= UX[a]; vy -= UY[a] with the group angle a and two 10-word DS tables
+  (EP12 cs:1A91..1ABC, tables ds:374B / ds:3761; EP4 cs:1C62 picks right/left by x >= 145, tables ds:598F/59A5 and
+  ds:59BB/59D1, and the left kick sets rule timer ds:081C = 400). It is not a plain wall reflection. engine.json
+  `flipper_kick.side_min_y / top_min_y / upper_kick` (the tables are read from the EXE by the exporter). Reached only by EP4's and
+  EP12's upper flippers; in EP10, EP11 and EP13 every lower-flipper contact has y >= 334 (not checked for EP8/EP9's outlines).
 * **Gravity**: EP9-13 do `vy += g + extra - [sub]` (EP9: `sub ax,[41B9]`). EP3 adds +2 for slot 2 only (`cmp di,4; jne; add
   [di+vy],2`). The exporter now writes both into engine.json (`gravity.terms`, `gravity.slot_bonus`).
 * **EP2's active surface** (cs:1A0F): D1/D2 are no contact; while the cooldown is set, CF/D0 are plain wall; outside x <= 260,
@@ -416,26 +422,32 @@ EP13 18. EP4 has one kicker cluster only: its slingshots are plain wall in its L
 scenario JSON as in section 3 with `table: n`. New optional fields (additive): `ball.active`, `balls` (slots 1..4, as the Swift
 port reads them), `extra_balls` (explicit slots).
 
-## 12. Differential results per table (`diff_traces.py --table N`, physics mode, 2026-09-27)
+## 12. Differential results per table (2026-09-27)
 
-`diff_traces.py --table N` runs `tools/emu/scenarios/EPn/` (table 1: the old default dirs), passes `--table N` to the port, and
-writes traces to `scratch/diff/traces/EPn/`.
+`diff_traces.py --table N` runs `tools/emu/scenarios/EPn/` plus its `hand/` and `extra/` subdirectories (table 1: the old default
+dirs), passes `--table N` to the port, and writes traces to `scratch/diff/traces/EPn/`. `run_suite.py` runs every table's sets (`EPn/`, `EPn/hand/`, `EPn/extra/`; the
+subdirectories hold directed scenarios, because `make_scenarios.py --table N` rewrites `EPn/*.json`) in any modes, in parallel,
+and prints the table in docs/formats/README.md ("Differential results"). Current state: **physics 415/415, rules 415/415,
+full 413/415** over all 13 tables.
 
-| table | exact | diverging scenarios and first cause |
-|---|---|---|
-| EP1 (generated set) | 18/18 | - |
-| EP2 | 10/19 | all 9 = EP2's active-surface variant (section 10): the port kicks where the original has no contact (lane at x=265 > 260, D1/D2) or adds kicker probes to the hit list (k off by one) |
-| EP3 | 19/19 | - |
-| EP4 | 18/21 | the 3 upper-flipper scenarios: flipper-kick y gates (y < 300 -> plain wall) not in the port |
-| EP5, EP6 | 18/18, 19/19 | - (after the exporter fixes below) |
-| EP7 | 19/19 | - (0xFF flipper colour works) |
-| EP8 | 11/13 | `plunger_launch`, `long_600_scripted`: the port does not start with slot 0 inactive and has no launch block |
-| EP9, EP10, EP11, EP13 | 18/18 each | - (after the exporter fixes below) |
-| EP12 | 19/21 | the 2 upper-flipper scenarios: flipper-kick y gates |
+History: the first all-table physics run was 223 of 239 exact; every divergence was a port feature that was missing (EP2's active
+surface, the flipper y gates and upper-flipper kick in EP4/EP12, EP8's launch block). The per-table checks (hand/extra sets)
+then found, and the port now implements: EP2 serve layer, lane without layer test, drain transfer, kick constant for y >= 200,
+sensor sprite mask, kicker off the ramp level; EP3 slot-2 gravity bonus, 2-slot drain, slot-2 nudge skip; EP4 drain layer clear
+and multiball transfer; EP5/EP6 shared lockout/kicker counter, serve vx = 2, EP5 x clamp stores 0; EP6/EP9 ball-position gates;
+EP7 serve clears the level; EP8 no serve, 3-slot drain, x max clamp 304, dynamic wall threshold and scan bounds, any-ball nudge
+condition; EP9-13 per-ball sensor lockout, 3 gravity slots, cooldown set before the tilt test; EP11/12 computed-offset pixel ops;
+the scenario's `active` flags. The rules port's `rules` mode had one lifter bug (EP3 kicker through `ah`, tools/rules.py) and the
+RULES_GAP attribution used the old ported-sensor list (now: rules.json handlers).
 
-Total: 223 of 239 exact. Every divergence is a port feature that is missing, not a harness or exporter error. The data the
-port needs is now in engine.json: `kicker.window/active_max/cooling_contact/contact_on_fire`, `flipper_kick.side_min_y/top_min_y`,
-`plunger.kind/launch`, `serve.present`.
+Full mode, the three scenarios that end in **ORIG_CRASH** (`diff_traces.py`: passes when every record before is identical): a ball
+reaches x < 0 (EP10/EP13 `upper_layer_loop` at x = -1, EP5 `hand/x_clamp_left` starting at x = -18) and the next frame's
+ball-background save, a planar VRAM copy whose `rep movsb` width comes from x (EP5 cs:378E, EP10 cs:4A50, EP13 cs:46E8), writes
+over the table's code segment [H: memory-write hook on the code range]. The original then hangs or faults on its corrupted code;
+the real game would crash the same way. `run_scenario.py` checks the code segment after every full-mode main loop and raises
+`CodeOverwritten`. The two EP8 full-mode failures (`hand/ball_ball_hit`, `hand/ball_ball_slot2`) are HARNESS_ERRORs: with two
+balls placed directly by the scenario, the background restore (cs:54EE) reads a record that was never saved, and the main loop
+does not finish within 200M instructions [M]. Both are exact in physics and rules mode.
 
 Exporter errors this found and fixed (`tools/export_engine_data.py`; EP1's engine.json only gained keys):
 * kicker cooldown fell back to EP1's 3 in EP2, EP5 and EP9-13 because the call pattern assumed `jne +3`. It is now 2 (EP2)
@@ -444,7 +456,5 @@ Exporter errors this found and fixed (`tools/export_engine_data.py`; EP1's engin
 * `ball_slots_initial` was missing for EP3 and EP9-13 (patterns tolerate EP3's `jne +3; jmp` and EP9-13's lockout copy).
 * tilt handling: `tilt_disables` was false for EP9-13 (their tilt test is `jne +3; jmp short`).
 
-Rules mode on the other tables (information for the rules port; `--mode rules`): EP7, EP9, EP10 and EP13 are fully exact.
-In EP3, 6 scenarios diverge from the first bumper contact on (the original has kick 4, the port 0), probably an EP3 sensor
-handler on the kicker colours; this was not investigated. The rest are the physics-mode causes above, or `RULES_GAP`s at
-handlers the port does not run.
+EP10's two unlifted main-loop fragments (cs:053E ball steering, cs:0571 top gate; rules.md 4.3) sit outside the physics ranges
+and run in full mode only; the port runs them from the EXE (TableGlue `preFrame` / `postTimers`).

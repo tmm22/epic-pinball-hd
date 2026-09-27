@@ -125,6 +125,13 @@ class PushoutLivelock(EmuError):
     pass
 
 
+class CodeOverwritten(EmuError):
+    """The original's main loop wrote over its own code segment (e.g. save_ball_bg's `rep movsb` with a
+    width computed from a ball at x < 0, EP10 cs:4A50), so it cannot run on: on the real machine the game
+    crashes or hangs there too."""
+    pass
+
+
 class EpEmu:
     def __init__(self, table=1, exe_path=None, log_io=False, boot=True, angle_digit='1', players='1'):
         self.table = table
