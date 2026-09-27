@@ -8,6 +8,7 @@ let package = Package(
         .executable(name: "EpicPinball", targets: ["EpicPinball"]),
         .library(name: "PinballCore", targets: ["PinballCore"]),
         .library(name: "PinballAudio", targets: ["PinballAudio"]),
+        .library(name: "PinballImport", targets: ["PinballImport"]),
     ],
     targets: [
         // Platform-agnostic logic: asset parsing, simulation, camera, viewport maths.
@@ -37,10 +38,22 @@ let package = Package(
             dependencies: ["PinballCore", "COpenMPT"]
         ),
 
+        // Swift importer: reads the user's CD image / install and produces the
+        // runtime library (no Python needed). No AppKit / Metal.
+        .target(
+            name: "PinballImport",
+            dependencies: ["PinballCore"]
+        ),
+
         // AppKit + MetalKit front end and command-line handling.
         .executableTarget(
             name: "EpicPinball",
-            dependencies: ["PinballCore", "PinballRender", "PinballAudio"]
+            dependencies: ["PinballCore", "PinballRender", "PinballAudio", "PinballImport"]
+        ),
+
+        .testTarget(
+            name: "PinballImportTests",
+            dependencies: ["PinballImport"]
         ),
 
         .testTarget(
