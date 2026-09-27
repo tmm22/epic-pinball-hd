@@ -50,9 +50,13 @@ public struct SoundEvent: Sendable, Equatable {
     /// Optional pitch sweep: rate delta per frame and number of frames.
     public var sweepPerFrame: Int = 0
     public var sweepFrames: Int = 0
-    public init(sample: Int, rateHz: Int, sweepPerFrame: Int = 0, sweepFrames: Int = 0) {
+    /// Stereo position 0...15 as sfx_play computes it (sound id high nibble if
+    /// non-zero, else min(ball_x / 20, 15)); -1 = let the audio side decide.
+    public var pan: Int = -1
+    public init(sample: Int, rateHz: Int, sweepPerFrame: Int = 0, sweepFrames: Int = 0, pan: Int = -1) {
         self.sample = sample; self.rateHz = rateHz
         self.sweepPerFrame = sweepPerFrame; self.sweepFrames = sweepFrames
+        self.pan = pan
     }
 }
 

@@ -124,7 +124,7 @@ public final class AudioEngine: @unchecked Sendable {
 
     /// Plays effects in order, centred (`SoundEvent` carries no pan yet).
     public func submit(events: [SoundEvent]) {
-        for e in events { queue.push(.sfx(SfxCommand(e).raw)) }
+        for e in events { queue.push(.sfx(SfxCommand(e, pan: e.pan >= 0 ? e.pan : nil).raw)) }
     }
 
     /// Plays effects in order, with pan.
