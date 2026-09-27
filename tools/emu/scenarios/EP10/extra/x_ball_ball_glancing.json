@@ -1,0 +1,25 @@
+{
+ "name": "x_ball_ball_glancing",
+ "table": 10,
+ "frames": 150,
+ "ball": {
+  "x": 127,
+  "y": 237,
+  "xf": 0,
+  "yf": 0,
+  "vx": 280,
+  "vy": 0
+ },
+ "balls": [
+  {
+   "x": 153,
+   "y": 244,
+   "xf": 0,
+   "yf": 0,
+   "vx": -260,
+   "vy": -60
+  }
+ ],
+ "description": "2 balls in open space, ball 0 at (127,237); ball_ball_collide (cs:1d3e) first runs at step 2 before any wall contact of ball 0; pairs (di,si) [(0, 2)] in the first 12 frames.",
+ "inputs": []
+}

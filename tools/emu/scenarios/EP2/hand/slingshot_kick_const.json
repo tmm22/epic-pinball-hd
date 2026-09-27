@@ -1,0 +1,18 @@
+{
+ "name": "slingshot_kick_const",
+ "table": 2,
+ "frames": 200,
+ "ball": {
+  "x": 191,
+  "y": 327,
+  "xf": 0,
+  "yf": 0,
+  "vx": 388,
+  "vy": -160
+ },
+ "description": "slingshot_hit with params.kicker=3: kicker_hit sets kick_strength=param[2] (cs:1B5D), but for ball y >= 200 it overwrites it with the constant 6 (cs:1BD3), so the slingshot kick stays 6 (bumpers, y < 200, use param[2]). Latent in real play (param[2] is 6 in EP2).",
+ "params": {
+  "kicker": 3
+ },
+ "inputs": []
+}

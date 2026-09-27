@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_BF",
+ "table": 13,
+ "frames": 200,
+ "ball": {
+  "x": 30,
+  "y": 173,
+  "xf": 0,
+  "yf": 0,
+  "vx": -106,
+  "vy": -106,
+  "layer": 0
+ },
+ "mode": "rules",
+ "description": "rules mode, level 0: ball (30,173) v=(-106,-106) into the BF sensor pixels around (23,165); the original dispatches BF (handler cs:2038) first at frame 3; colours seen in 40 frames: BF.",
+ "inputs": []
+}

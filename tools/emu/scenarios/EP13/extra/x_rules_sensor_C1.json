@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_C1",
+ "table": 13,
+ "frames": 200,
+ "ball": {
+  "x": 150,
+  "y": 24,
+  "xf": 0,
+  "yf": 0,
+  "vx": -150,
+  "vy": 0,
+  "layer": 0
+ },
+ "mode": "rules",
+ "description": "rules mode, level 0: ball (150,24) v=(-150,0) into the C1 sensor pixels around (142,31); the original dispatches C1 (handler cs:2859) first at frame 0; colours seen in 40 frames: C1 D0.",
+ "inputs": []
+}

@@ -2,14 +2,22 @@ import Foundation
 import Metal
 import PinballCore
 
-/// Upscaling filter applied in the present pass. Add a case + a fragment
-/// function in Pinball.metal to plug in a new filter (e.g. xBR, CRT mask).
+/// Upscaling filter applied in the present pass (integer-scaled viewport in every case).
+/// Add a case + a fragment function in Pinball.metal to plug in a new filter.
+/// `nearest` is the classic look; the others are enhanced-mode groundwork:
+/// * `xbrz-like`: placeholder edge-directed filter (Scale2x/EPX rules evaluated per output
+///   pixel, so it works at any integer scale); a real xBRZ can replace the function.
+/// * `crt`: nearest plus scanlines and a light aperture mask.
 public enum UpscaleFilter: String, Sendable, CaseIterable {
     case nearest
+    case xbrzLike = "xbrz-like"
+    case crt
 
     var fragmentFunctionName: String {
         switch self {
         case .nearest: return "present_nearest"
+        case .xbrzLike: return "present_epx"
+        case .crt: return "present_crt"
         }
     }
 }
@@ -42,6 +50,8 @@ struct SceneUniforms {
     var ballPixels: (SIMD4<UInt32>, SIMD4<UInt32>, SIMD4<UInt32>, SIMD4<UInt32>, SIMD4<UInt32>, SIMD4<UInt32>, SIMD4<UInt32>,
                      SIMD4<UInt32>, SIMD4<UInt32>, SIMD4<UInt32>, SIMD4<UInt32>, SIMD4<UInt32>, SIMD4<UInt32>, SIMD4<UInt32>)
         = (.zero, .zero, .zero, .zero, .zero, .zero, .zero, .zero, .zero, .zero, .zero, .zero, .zero, .zero)
+    /// x: 1 = draw the window dot overlay; y: overlay rows.
+    var overlayInfo: F4 = .zero
 
     static let maxFlippers = 4
     static let ballBytes = 14 * 16
@@ -66,6 +76,18 @@ struct SceneUniforms {
 struct PresentUniforms {
     var dst: SIMD4<Float>
     var src: SIMD4<Float>
+    /// x: strip rows visible below the window (0 = none).
+    var strip: SIMD4<Float> = .zero
+}
+
+/// The original's 320x240 Mode X screen: the scrolling playfield window above the VGA
+/// split line and the display strip below it (docs/formats/sprites.md 2.5).
+public struct ScreenLayout: Sendable, Equatable {
+    /// Strip rows currently on screen (0 = hidden or legacy 320x200 view).
+    public var stripRows: Int
+    /// Screen height in source pixels.
+    public static let screenRows = 240
+    public init(stripRows: Int) { self.stripRows = stripRows }
 }
 
 /// Two-pass palette renderer.
@@ -81,6 +103,12 @@ public final class PinballRenderer {
     public var aspect: PixelAspect = .square
     public var filter: UpscaleFilter = .nearest
     public private(set) var palette: Palette
+    /// Palette before per-frame overrides (PresentationState.paletteOverrides).
+    public private(set) var basePalette: Palette
+    /// Classic presentation (lamp overlays, strip, dot messages). nil = playfield only.
+    public private(set) var composer: ClassicComposer?
+    /// Strip rows shown below the window (set by the front end; 0 = none).
+    public var stripRows = 0
 
     private let library: MTLLibrary
     private let scenePipeline: MTLRenderPipelineState
@@ -88,6 +116,9 @@ public final class PinballRenderer {
     private let indexTexture: MTLTexture
     private let paletteTexture: MTLTexture
     private let atlasTexture: MTLTexture
+    /// Window-relative dot overlay (320x240 R8Uint, 0 = transparent) and strip (320x30 R8Uint).
+    private let overlayTexture: MTLTexture
+    private let stripTexture: MTLTexture
     /// Flipper sprite frames (nil entries fall back to procedural capsules).
     public let flipperSprites: FlipperSpriteSet?
     /// Native frame: 320 x (400 + 1). One spare row allows sub-row smooth scrolling.
@@ -100,6 +131,7 @@ public final class PinballRenderer {
         guard let q = device.makeCommandQueue() else { throw RenderError.resourceCreation("command queue") }
         self.commandQueue = q
         self.palette = assets.palette
+        self.basePalette = assets.palette
 
         let source = try Self.shaderSource()
         do { library = try device.makeLibrary(source: source, options: nil) } catch {
@@ -146,6 +178,18 @@ public final class PinballRenderer {
         }
         atlasTexture = atlas
 
+        func r8(_ w: Int, _ h: Int, _ what: String) throws -> MTLTexture {
+            let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .r8Uint, width: w, height: h, mipmapped: false)
+            d.usage = .shaderRead
+            d.storageMode = .shared
+            guard let t = device.makeTexture(descriptor: d) else { throw RenderError.resourceCreation(what) }
+            let zero = [UInt8](repeating: 0, count: w * h)
+            zero.withUnsafeBytes { t.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: w) }
+            return t
+        }
+        overlayTexture = try r8(w, ClassicComposer.overlayRows, "overlay texture")
+        stripTexture = try r8(w, ClassicComposer.stripBufferRows, "strip texture")
+
         scenePipeline = try Self.makePipeline(device: device, library: library, fragment: "scene_fragment", format: Self.frameFormat)
         uploadPalette()
     }
@@ -179,8 +223,20 @@ public final class PinballRenderer {
 
     // MARK: - Palette (lamp animation hook)
 
-    /// Replace the whole palette (e.g. after lamp logic edits entries 200-254).
+    /// Replace the whole palette (e.g. after lamp logic edits entries 200-254). Also becomes
+    /// the base that per-frame overrides apply to.
     public func setPalette(_ p: Palette) {
+        palette = p
+        basePalette = p
+        uploadPalette()
+    }
+
+    /// Base palette with this frame's overrides (entries not listed revert to the base).
+    public func applyPaletteOverrides(_ overrides: [PaletteOverride], messageColour: Palette.RGB? = nil) {
+        var p = basePalette
+        if let m = messageColour { p[255] = m }
+        for o in overrides { p[Int(o.index)] = Palette.RGB(r: o.r, g: o.g, b: o.b) }
+        guard p != palette else { return }
         palette = p
         uploadPalette()
     }
@@ -202,10 +258,64 @@ public final class PinballRenderer {
 
     // MARK: - Frame encoding
 
+    // MARK: - Classic presentation
+
+    /// Attaches the classic composer: its VRAM replaces the playfield index texture.
+    public func attach(composer c: ClassicComposer) {
+        composer = c
+        uploadIndexRows(0..<TableGeometry.height, from: c.vram)
+        _ = c.takeDirtyRows()
+    }
+
+    private func uploadIndexRows(_ rows: Range<Int>, from buf: [UInt8]) {
+        let w = TableGeometry.width
+        buf.withUnsafeBytes { raw in
+            indexTexture.replace(region: MTLRegionMake2D(0, rows.lowerBound, w, rows.count), mipmapLevel: 0,
+                                 withBytes: raw.baseAddress! + rows.lowerBound * w, bytesPerRow: w)
+        }
+    }
+
+    /// Applies one frame of presentation state: lamp overlays, flipper frames and the plunger
+    /// into VRAM, palette overrides (DAC 255 = message colour unless overridden), the strip
+    /// and the dot overlay. `message` carries the placement the original needs (AX, DI);
+    /// see `DotMessage`. No-op without a composer.
+    /// `lampSprites`: optional tri-state per slot (0 not drawn, 1 "a", 2 "b"; the rules
+    /// runtime's lampDrawn) that replaces `state.lamps`, which cannot say "not drawn yet".
+    public func present(_ state: PresentationState, message: DotMessage?, flippers: [SceneState.FlipperSprite] = [],
+                        plungerY: Int? = nil, paused: Bool = false, lampSprites: [UInt8]? = nil) {
+        guard let c = composer else { return }
+        if let ls = lampSprites { c.applyLampSprites(ls) } else { c.applyLamps(state.lamps) }
+        for f in flippers { c.setFlipper(f.index, frame: f.frame) }
+        c.setPlunger(y: plungerY)
+        if let rows = c.takeDirtyRows() { uploadIndexRows(rows, from: c.vram) }
+        let score = state.scores.indices.contains(state.currentPlayer) ? state.scores[state.currentPlayer] : (state.scores.first ?? 0)
+        c.buildStrip(score: score, ball: state.ballNumber, player: state.currentPlayer + 1, tilted: state.tilted,
+                     paused: paused, message: message)
+        c.buildOverlay(message: message)
+        let w = TableGeometry.width
+        if c.stripDirty {
+            c.strip.withUnsafeBytes { stripTexture.replace(region: MTLRegionMake2D(0, 0, w, ClassicComposer.stripBufferRows), mipmapLevel: 0,
+                                                            withBytes: $0.baseAddress!, bytesPerRow: w) }
+            c.markStripUploaded()
+        }
+        if c.overlayDirty {
+            c.overlay.withUnsafeBytes { overlayTexture.replace(region: MTLRegionMake2D(0, 0, w, ClassicComposer.overlayRows), mipmapLevel: 0,
+                                                                withBytes: $0.baseAddress!, bytesPerRow: w) }
+            c.markOverlayUploaded()
+        }
+        applyPaletteOverrides(state.paletteOverrides, messageColour: c.messageColour)
+    }
+
     /// Viewport the scene will occupy in an output of the given pixel size.
     public func fit(for scene: SceneState, outputWidth: Int, outputHeight: Int) -> ViewportFit {
-        ViewportFit.fit(sourceWidth: TableGeometry.width, sourceHeight: Int(scene.viewHeight.rounded()),
+        ViewportFit.fit(sourceWidth: TableGeometry.width, sourceHeight: Int(scene.viewHeight.rounded()) + visibleStripRows(for: scene),
                         outputWidth: outputWidth, outputHeight: outputHeight, aspect: aspect)
+    }
+
+    /// Strip rows drawn for this scene (none in the 400-row full-table view).
+    public func visibleStripRows(for scene: SceneState) -> Int {
+        guard composer != nil, scene.viewHeight < Double(TableGeometry.height) else { return 0 }
+        return max(0, min(stripRows, ClassicComposer.stripBufferRows))
     }
 
     /// Encodes both passes, finishing with `target` cleared to black outside the viewport.
@@ -236,7 +346,11 @@ public final class PinballRenderer {
                 su.ballInfo = SIMD4(2, 0, 0, 0)
             }
         }
-        for (slot, f) in scene.flippers.prefix(SceneUniforms.maxFlippers).enumerated() {
+        let composerFlippers = composer?.drawsFlippers ?? false
+        if let c = composer, c.hasOverlay, scene.viewHeight < Double(TableGeometry.height) {
+            su.overlayInfo = SIMD4(1, Float(ClassicComposer.overlayRows), 0, 0)
+        }
+        for (slot, f) in scene.flippers.prefix(SceneUniforms.maxFlippers).enumerated() where !composerFlippers {
             let cap = SIMD4(Float(f.pivot.x), Float(f.pivot.y), Float(f.tip.x), Float(f.tip.y))
             if let sp = flipperSprites, sp.entries.indices.contains(f.index), let e = sp.entries[f.index] {
                 let frame = max(0, min(e.frameRows.count - 1, f.frame))
@@ -261,13 +375,15 @@ public final class PinballRenderer {
         enc1.setFragmentTexture(indexTexture, index: 0)
         enc1.setFragmentTexture(paletteTexture, index: 1)
         enc1.setFragmentTexture(atlasTexture, index: 2)
+        enc1.setFragmentTexture(overlayTexture, index: 3)
         enc1.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc1.endEncoding()
 
         // Pass 2: upscale into the output.
         var pu = PresentUniforms(
             dst: SIMD4(Float(fit.x), Float(fit.y), Float(fit.scaleX), Float(fit.scaleY)),
-            src: SIMD4(Float(TableGeometry.width), Float(visibleRows), Float(frac), 0))
+            src: SIMD4(Float(TableGeometry.width), Float(visibleRows), Float(frac), 0),
+            strip: SIMD4(Float(visibleStripRows(for: scene)), 0, 0, 0))
         let presentPass = MTLRenderPassDescriptor()
         presentPass.colorAttachments[0].texture = target
         presentPass.colorAttachments[0].loadAction = .clear
@@ -285,6 +401,8 @@ public final class PinballRenderer {
         enc2.setRenderPipelineState(try presentPipeline(for: target.pixelFormat))
         enc2.setFragmentBytes(&pu, length: MemoryLayout<PresentUniforms>.stride, index: 0)
         enc2.setFragmentTexture(frameTexture, index: 0)
+        enc2.setFragmentTexture(stripTexture, index: 1)
+        enc2.setFragmentTexture(paletteTexture, index: 2)
         enc2.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc2.endEncoding()
     }

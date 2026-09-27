@@ -1,0 +1,15 @@
+{
+ "name": "slingshot_hit",
+ "table": 11,
+ "frames": 200,
+ "ball": {
+  "x": 88,
+  "y": 175,
+  "xf": 0,
+  "yf": 0,
+  "vx": -212,
+  "vy": 212
+ },
+ "description": "Ball at (88,175) with v=(-212,212) into the kicker cluster around (73,203) (colours D2, 893 px): first contact frame 0 step 2, k=31, kick 5.",
+ "inputs": []
+}

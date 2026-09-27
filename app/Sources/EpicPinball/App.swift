@@ -8,13 +8,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let options: Options
     let assets: TableAssets
     let engine: ClassicEngine
+    let dataRoot: URL
     var window: NSWindow?
     var controller: GameController?
 
-    init(options: Options, assets: TableAssets, engine: ClassicEngine) {
+    init(options: Options, assets: TableAssets, engine: ClassicEngine, dataRoot: URL) {
         self.options = options
         self.assets = assets
         self.engine = engine
+        self.dataRoot = dataRoot
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -26,11 +28,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                            flipperSprites: options.sprites ? loadFlipperSprites(assets: assets, engine: engine) : nil)
         } catch { fail("\(error)") }
         renderer.aspect = options.aspect
+        renderer.filter = options.filter
+        var pres: ClassicPresentation?
+        if !options.legacyWindow,
+           let p = ClassicPresentation.load(assets: assets, engine: engine.data, dataRoot: dataRoot, originalDir: options.originalDir) {
+            p.setStrip(shown: options.stripShown, immediately: true)
+            p.state = flagPresentation(options, p)
+            p.directMessage = directMessage(options.message, p, lines: options.messageLines)
+            p.paused = options.paused
+            renderer.attach(composer: p.composer)
+            pres = p
+        }
 
-        // 3x the original 320x200 window, in points (Retina doubles it in pixels).
-        let content = NSRect(x: 0, y: 0, width: 960, height: 600)
+        // 3x the original screen (320x240 Mode X, or the legacy 320x200 window), in points
+        // (Retina doubles it in pixels).
+        let content = NSRect(x: 0, y: 0, width: 960, height: pres == nil ? 600 : 720)
         let view = GameView(frame: content, device: device)
-        let controller = GameController(renderer: renderer, view: view, sim: GameSimulation(engine: engine, mode: options.mode))
+        let sim = GameSimulation(engine: engine, mode: options.mode, options: options.rulesOptions)
+        let controller = GameController(renderer: renderer, view: view, sim: sim, presentation: pres)
+        controller.rulesOptions = options.rulesOptions
+        if options.autopilot {
+            var player = AutoPlayer(engine: engine)
+            sim.inputProvider = { player.input(for: $0) }
+        }
+        controller.audio = options.mute ? nil : AudioController(table: assets.table, originalDir: options.originalDir, options: options)
+        if let err = engine.rulesLoadError { warn("table rules not loaded, physics only: \(err)") }
+        for w in engine.rules?.warnings ?? [] { warn("rules: \(w)") }
+        if !options.demo, engine.rules != nil, !options.hasPresentationFlags {
+            // The table's rules run the game: one PresentationState per original frame goes to the
+            // renderer (lamps, score, messages) and to the audio engine (effects, music).
+            controller.presentationSource = { (sim.takePresentation(), nil) }
+        }
+        if options.demo, let p = pres {
+            let g = p.composer.graphics
+            controller.demo = DemoDriver(lampCount: g.lampCount, restIsA: g.lampRestIsA,
+                                         messages: DemoDriver.findMessages(tableDirectory: assets.directory, exe: p.exe,
+                                                                           dataSegment: g.dataSegment))
+        }
         controller.exitAfter = options.exitAfter
         controller.capturePath = options.windowCapture
         if options.windowCapture != nil { view.framebufferOnly = false }
@@ -51,6 +85,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationWillTerminate(_ notification: Notification) { controller?.audio?.stop() }
 
     /// Key-up / flagsChanged events are not delivered while another window is key,
     /// so drop held keys and flipper buttons when focus leaves (avoids stuck input).
@@ -99,11 +135,31 @@ final class GameController: NSObject, MTKViewDelegate {
         static let up: UInt16 = 126, down: UInt16 = 125, left: UInt16 = 123, right: UInt16 = 124
         static let tab: UInt16 = 48, space: UInt16 = 49, r: UInt16 = 15, a: UInt16 = 0, e: UInt16 = 14
         static let z: UInt16 = 6, comma: UInt16 = 43, slash: UInt16 = 44, escape: UInt16 = 53
+        static let returnKey: UInt16 = 36, keypadEnter: UInt16 = 76, f: UInt16 = 3
+        static let m: UInt16 = 46, s: UInt16 = 1, p: UInt16 = 35, minus: UInt16 = 27, equal: UInt16 = 24
+        static let leftBracket: UInt16 = 33, rightBracket: UInt16 = 30
     }
 
     let renderer: PinballRenderer
     let sim: GameSimulation
     var camera = Camera()
+    /// Classic presentation (strip, overlays, messages, original camera); nil = legacy view.
+    let presentation: ClassicPresentation?
+    /// `--demo`: drives lamps/score/messages without rules.
+    var demo: DemoDriver?
+    /// Hook for the rules integration: called once per original frame; return the frame's
+    /// PresentationState and, when the producer knows the original's placement (AX, DI,
+    /// appended text lines, live DS text), the full DotMessage; nil keeps the current state.
+    var presentationSource: (() -> (PresentationState, DotMessage?)?)?
+    /// Table audio (nil with --mute or without the original files).
+    var audio: AudioController?
+    /// Options for a new game (R key / after game over).
+    var rulesOptions = RulesOptions()
+    /// P: the game is frozen (no frames run), music paused, the pause banner shown.
+    private(set) var paused = false
+    /// The rules reported game over: frames stop until R starts a new game.
+    private(set) var gameOver = false
+    private var manualY: Int?
     private var heldKeys = Set<UInt16>()
     private var modifiers = (leftShift: false, rightShift: false, control: false)
     private var lastTime: CFTimeInterval?
@@ -113,9 +169,10 @@ final class GameController: NSObject, MTKViewDelegate {
     private var startTime: CFTimeInterval?
     private var frames = 0
 
-    init(renderer: PinballRenderer, view: MTKView, sim: GameSimulation) {
+    init(renderer: PinballRenderer, view: MTKView, sim: GameSimulation, presentation: ClassicPresentation? = nil) {
         self.renderer = renderer
         self.sim = sim
+        self.presentation = presentation
         super.init()
         view.colorPixelFormat = .bgra8Unorm
         view.colorspace = CGColorSpace(name: CGColorSpace.sRGB)  // palette values are sRGB
@@ -124,6 +181,10 @@ final class GameController: NSObject, MTKViewDelegate {
         view.autoResizeDrawable = true   // drawableSize tracks backing (Retina) pixels
         view.delegate = self
         camera.snap(toBallY: sim.renderBallTopLeft.y + 7)
+        if let p = presentation {
+            camera.windowHeight = Double(p.windowRows)
+            p.camera.snap(maxBallY: ClassicPresentation.maxActiveBallY(sim.engine), cameraMax: p.cameraMax)
+        }
     }
 
     // MARK: input
@@ -134,14 +195,47 @@ final class GameController: NSObject, MTKViewDelegate {
         case Key.up, Key.down, Key.left, Key.right, Key.space, Key.z, Key.comma, Key.slash: heldKeys.insert(code)
         case Key.tab: if !isRepeat { camera.showFullTable.toggle() }
         case Key.r:
-            if !isRepeat { sim.resetBall(); camera.snap(toBallY: sim.renderBallTopLeft.y + 7) }
+            if !isRepeat { newGame() }
+        case Key.p: if !isRepeat { setPaused(!paused) }
+        case Key.m: if !isRepeat { audio?.toggleMusic() }
+        case Key.s: if !isRepeat { audio?.toggleSfx() }
+        case Key.minus: audio?.adjust(master: -0.1)
+        case Key.equal: audio?.adjust(master: 0.1)
+        case Key.leftBracket: audio?.adjust(music: -0.1)
+        case Key.rightBracket: audio?.adjust(music: 0.1)
         case Key.a: if !isRepeat { renderer.aspect = renderer.aspect == .square ? .vga : .square }
+        case Key.returnKey, Key.keypadEnter: if !isRepeat { presentation?.toggleStrip() }
+        case Key.f:
+            if !isRepeat {
+                let all = UpscaleFilter.allCases
+                renderer.filter = all[((all.firstIndex(of: renderer.filter) ?? 0) + 1) % all.count]
+            }
         case Key.e: if !isRepeat { sim.mode = sim.mode == .classic ? .enhanced : .classic }
         case Key.escape: NSApp.terminate(nil)
         default: return false
         }
         updateInput()
         return true
+    }
+
+    /// R: a new game with the rules (the original's pause-menu restart), or a new ball without them.
+    func newGame() {
+        if sim.engine.rules != nil {
+            sim.newGame(options: rulesOptions)
+        } else {
+            sim.resetBall()
+        }
+        gameOver = false
+        setPaused(false)
+        camera.snap(toBallY: sim.renderBallTopLeft.y + 7)
+        if let p = presentation { p.camera.snap(maxBallY: ClassicPresentation.maxActiveBallY(sim.engine), cameraMax: p.cameraMax) }
+    }
+
+    func setPaused(_ on: Bool) {
+        paused = on
+        presentation?.paused = on || gameOver
+        audio?.setPaused(on)
+        lastTime = nil
     }
 
     func keyUp(_ code: UInt16) {
@@ -162,6 +256,7 @@ final class GameController: NSObject, MTKViewDelegate {
 
     /// Maps keys to the original's input flags (keyboard_isr cs:314B).
     private func updateInput() {
+        sim.inputProvider = nil   // any game key takes over from --autopilot
         var i: FrameInput = []
         if modifiers.leftShift || heldKeys.contains(Key.left) { i.insert(.leftFlipper) }
         if modifiers.rightShift || heldKeys.contains(Key.right) { i.insert(.rightFlipper) }
@@ -181,13 +276,55 @@ final class GameController: NSObject, MTKViewDelegate {
         let dt = lastTime.map { now - $0 } ?? 0
         lastTime = now
 
-        sim.advance(by: dt)
+        let ran = paused || gameOver ? 0 : sim.advance(by: dt)
+        // Rules output once per original frame (sounds of every frame in order); the renderer takes
+        // the latest, the audio engine every frame's effects.
+        var frameStates: [(PresentationState, DotMessage?)] = []
+        if demo == nil, let src = presentationSource {
+            for _ in 0..<ran { if let st = src() { frameStates.append(st) } }
+        }
+        for (st, _) in frameStates {
+            audio?.present(st)
+            if st.gameOver && !gameOver {
+                gameOver = true
+                presentation?.paused = true   // the original enters its menu here (pause_menu)
+            }
+        }
         let scroll = (heldKeys.contains(Key.down) ? 1 : 0) - (heldKeys.contains(Key.up) ? 1 : 0)
-        camera.update(dt: min(dt, 0.1), ballY: sim.renderBallTopLeft.y + 7, scroll: scroll)
+        if let p = presentation {
+            // Original camera in classic mode (integer rows, eased per frame); arrows scroll
+            // manually like manual_scroll (cs:0B03) until released.
+            if scroll != 0 {
+                manualY = max(0, (manualY ?? p.camera.y) + scroll * 4)
+            } else { manualY = nil }
+            for _ in 0..<ran {
+                if var d = demo {
+                    var st = p.state
+                    _ = d.step(into: &st, messagesInStrip: p.spec.messagesInStrip)
+                    p.ingest(st)
+                    p.directMessage = directMessage(d.messageSpec(at: d.frame, inStrip: p.spec.messagesInStrip), p)
+                    demo = d
+                } else if !frameStates.isEmpty {
+                    let (s, msg) = frameStates.removeFirst()
+                    p.ingest(s)
+                    if let msg { p.directMessage = msg }
+                }
+                p.stepFrame(engine: sim.engine, manualY: manualY)
+            }
+            camera.windowHeight = Double(p.windowRows)
+            if sim.mode == .classic {
+                camera.setY(Double(p.camera.y))
+            } else {
+                camera.update(dt: min(dt, 0.1), ballY: sim.renderBallTopLeft.y + 7, scroll: scroll)
+            }
+        } else {
+            camera.update(dt: min(dt, 0.1), ballY: sim.renderBallTopLeft.y + 7, scroll: scroll)
+        }
 
         guard let drawable = view.currentDrawable,
               let cb = renderer.commandQueue.makeCommandBuffer() else { return }
         let scene = SceneState(simulation: sim, camera: camera)
+        presentation?.apply(to: renderer, scene: scene, engine: sim.engine)
         do {
             try renderer.encode(scene: scene, into: cb, target: drawable.texture)
         } catch {
@@ -219,6 +356,12 @@ final class GameController: NSObject, MTKViewDelegate {
         cb.commit()
         cb.waitUntilCompleted()
         let scale = view.window?.backingScaleFactor ?? 1
+        if let a = audio {
+            print("audio: \(a.effectsSubmitted) effects submitted, music \(a.musicPaused ? "paused" : "playing"), dropped commands \(a.engine.droppedCommands)")
+        } else {
+            print("audio: off")
+        }
+        print("game: score \(sim.engine.rules?.score ?? 0), game over \(gameOver)")
         print("smoke test: \(frames) frames in \(String(format: "%.2f", elapsed)) s, drawable \(tex.width)x\(tex.height) (\(tex.pixelFormat == .bgra8Unorm ? "bgra8Unorm" : "format \(tex.pixelFormat.rawValue)")), backing scale \(scale), engine frames \(sim.engine.frameCount)")
         if let buf = readback, let path = capturePath {
             let n = tex.width * tex.height

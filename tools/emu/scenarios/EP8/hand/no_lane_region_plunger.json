@@ -1,0 +1,16 @@
+{
+ "name": "no_lane_region_plunger",
+ "table": 8,
+ "frames": 90,
+ "ball": {
+  "x": 293,
+  "y": 222,
+  "xf": 0,
+  "yf": 0,
+  "vx": 60,
+  "vy": 0
+ },
+ "description": "Ball at (293,222) v=(60,0), plunger held 30 frames: inside the region that is the plunger lane in EP1 (x>=280, y>=220). EP8 has no lane: vx is never zeroed, and the plunger only sets the launch flag ds:5AEC while no ball is active (cs:0B62..0B7C skip the launch block while any of slots 0..2 is active).",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": [4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+}

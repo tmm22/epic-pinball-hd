@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_C7",
+ "table": 12,
+ "frames": 200,
+ "ball": {
+  "x": 10,
+  "y": 365,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 150,
+  "layer": 0
+ },
+ "mode": "rules",
+ "description": "rules mode, level 0: ball (10,365) v=(0,150) into the C7 sensor pixels around (17,382); the original dispatches C7 (handler cs:22d1) first at frame 1; colours seen in 40 frames: C7.",
+ "inputs": []
+}

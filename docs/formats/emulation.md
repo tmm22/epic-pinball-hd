@@ -1,10 +1,16 @@
-# Emulation harness: the original EP1.EXE physics as ground truth
+# Emulation harness: the original table code as ground truth
 
-`tools/emu/` runs the **original EP1.EXE machine code** under the Unicorn CPU emulator
-(x86, 16-bit real mode) and writes per-physics-step traces that the Swift port can be
-diffed against. The EXE is read from the user's own `original/EP1.EXE` at run time.
+`tools/emu/` runs the **original EPn.EXE machine code** (all 13 tables) under the Unicorn CPU
+emulator (x86, 16-bit real mode) and writes per-physics-step traces that the Swift port can be
+diffed against. The EXE is read from the user's own `original/EPn.EXE` at run time.
 Nothing from the game (code, tables, art) is copied into `tools/` or `docs/`: the harness
-contains only code addresses and variable offsets found by reverse engineering.
+contains only code addresses and variable offsets, and for tables other than EP1 even those
+are found at run time by byte signatures (`tools/emu/discover.py`, section 10) and cached in
+`tools/emu/tables/EPn.json`.
+
+Sections 1-9 describe the harness on EP1, where it was built and checked in most depth.
+Section 10 covers the per-table configuration, section 11 the per-table scenario sets, and
+section 12 the differential results for every table.
 
 Confidence tags as in the other docs: **[H]** checked by running code (harness and/or
 DOSBox-X), **[M]** read from code but not exercised, **[L]** guess.
@@ -21,6 +27,12 @@ Addresses: `cs:XXXX` = EP1 code segment 0x3223, `ds:XXXX` = EP1 data segment 0x0
 .venv/bin/python tools/emu/compare_ref.py [--plunger-adapter] [-v]     # vs scratch/engine/ep1_physics_ref.py
 .venv/bin/python scratch/emu/validate_traces.py                        # schema check of scenarios + traces
 .venv/bin/python scratch/emu/compare_modes.py                          # physics vs rules vs full mode
+
+.venv/bin/python tools/emu/discover.py [N ...] [-v]                    # (re)write tools/emu/tables/EPn.json (all 13 by default)
+.venv/bin/python tools/emu/discover.py --check                         # EP1 config == the hand-verified ep_emu.EP1 dict
+.venv/bin/python tools/emu/make_scenarios.py --table 4 12 | --all      # generated sets -> tools/emu/scenarios/EPn/
+.venv/bin/python tools/emu/diff_traces.py -q --table 4                 # original EP4 vs `EpicPinball --trace ... --table 4`
+.venv/bin/python tools/emu/verify_rules.py 1 2 3 | --all               # rules.json vs the original code (rules.md section 5)
 ```
 
 A 600-frame scenario takes about 0.9 s including the boot (0.5 s). Runs are deterministic:
@@ -29,10 +41,14 @@ snapshot restores (checked for all 18 scenarios).
 
 | File | Purpose |
 |---|---|
-| `tools/emu/ep_emu.py` | Loader, boot, stubs, range/call runner, state accessors, snapshots |
+| `tools/emu/ep_emu.py` | Loader, boot, stubs, range/call runner, state accessors, snapshots (any table: `EpEmu(table=n)`) |
+| `tools/emu/discover.py`, `tools/emu/tables/EPn.json` | Per-table code/variable search and its cached result (section 10) |
+| `tools/emu/scenegen.py`, `tools/emu/scenarios/EPn/*.json` | Per-table scenario generator and sets (section 11) |
+| `tools/emu/diff_traces.py` | Differential test harness vs the Swift port (`--table N`) |
+| `tools/emu/verify_rules.py` | Differential test of lifted rules vs the original code (rules.md section 5) |
 | `tools/emu/run_scenario.py` | Scenario JSON -> JSONL trace (the contract) |
 | `tools/emu/trace_schema.json` | JSON Schema for scenarios and trace records (field names, units) |
-| `tools/emu/make_scenarios.py`, `tools/emu/scenarios/*.json` | The scenario set (18) |
+| `tools/emu/make_scenarios.py`, `tools/emu/scenarios/*.json` | EP1's hand-made scenario set (43 + 2 pathological) and the entry point for the per-table sets |
 | `tools/emu/compare_ref.py` | Step-by-step diff against the Python reference |
 | `scratch/emu/traces/*.jsonl` | Traces of all scenarios (physics mode) |
 | `scratch/emu/compare_modes.py`, `validate_traces.py` | Mode comparison, schema validation |
@@ -284,8 +300,9 @@ Captured frames (ZMBV 32 bpp) are decoded by `scratch/emu/zmbv_frames.py`. Scree
 
 ## 9. Limits
 
-* **EP1 only.** Other tables need their own addresses (compare_tables.py can find them) and checks of
-  their colour classes.
+* **EP1 has the deepest checks.** Every table boots and runs through the same harness (sections 10-12),
+  but the DOSBox-X check (section 8), the Python reference (section 6) and the adversarial scenarios exist
+  for EP1 only.
 * The trace records ball slot 0 only. Multi-ball scenarios can be set up with `pokes`/`set_ball`, but
   only slot 0 is written out.
 * Inputs are per frame (flippers, plunger). There are no nudge, tilt, pause or menu inputs. `params` overrides are written after
@@ -296,3 +313,138 @@ Captured frames (ZMBV 32 bpp) are decoded by `scratch/emu/zmbv_frames.py`. Scree
   through `_patch`, which calls `ctl_remove_cache`, and snapshot restore flushes the whole cache. Before this
   fix, running `full` then `physics` in one process could execute stale, unpatched blocks.
 * Sound, video and PC-speaker output are ignored. Render code still runs in `full` mode and writes to fake VRAM.
+
+## 10. Per-table configuration: `tools/emu/tables/EPn.json` [H: every table boots and runs]
+
+`EpEmu(table=n)` takes every address from `tools/emu/tables/EPn.json`. `tools/emu/discover.py` writes the file from byte
+signatures in the user's `EPn.EXE`. The signatures are EP1 code shapes (cited as EP1 cs:ip below), generalised with wildcards
+and followed structurally: call targets, jump targets, loop ends.
+The file is regenerated when it is missing or the EXE's SHA-1 changes. `"overrides"` is hand-maintained, survives rewrites and
+is applied on top of `"auto"`. `"evidence"` gives the code address of every match, and `"missing"` lists anything not found.
+`discover.py --check` confirms that EP1's effective config equals the hand-verified `ep_emu.EP1` dict. Only addresses,
+counts and small integers are stored; nothing from the game is.
+
+What is searched (EP1 addresses):
+
+| item | signature / method |
+|---|---|
+| `frame_sync`, `physics_step`, `main_loop` | `mov byte cs:[mode],0; mov dx,3DAh; in; and al,8; jne; cmp cs:[vsync],0; je` (cs:1243); the no-timer path's 3 calls give physics_step; the `jmp` after the retrace wait gives the main-loop top |
+| ball arrays, slots | physics_step head (`pusha; push es; mov [collided],0; mov di,0; cmp [di+active],1`), slot loop `add di,2; cmp di,2N`, and the two integration blocks (vx/accx/x, vy/accy/y) |
+| contact direction hook, hit list | collision_response (`mov bx,[hitcount]; dec bx; mov al,[bx+list]`) and the `k+24` wrap code; the hook address is the byte after the `contact_dir` store (cs:1AEC) |
+| wall test | `mov si,60h; mov dl,FLIP; mov al,LO or mov al,[VAR]; mov ah,HI; mov dh,ACTIVE; cmp [di+layer],1; jne; mov dh,0; mov al,LO1; mov ah,HI1` (cs:184A) -> `wall_test` |
+| kicker | `cmp byte [KC],0; jne; [x/y window]; call KICKER` in the wall loop (cs:18A1) -> `kicker_hit`, `ds_vars.kicker_cooldown` |
+| flipper-kick y gates | `cmp byte [flipper_contact],0; je; cmp word [di+y],Y; jb` after the direction store -> `flipper_kick_min_y` |
+| sensor dispatch | `mov bl,al; xor bh,bh; sub bx,0AAh; shl bx,1; mov bx,cs:[bx+T]; jmp bx` (cs:1E66) plus its layer/tilt filters |
+| keyboard flags | the int 9 ISR (`push cs; pop ds; in al,60h`) parsed as `cmp al,SC; je/jne; mov byte cs:[X],V` per scancode |
+| flipper groups, outlines | flipper_update (the call after the slot loop) key/moving/rest groups, and every outline draw site `mov si,[ANGLE]; shl si,1; mov si,[si+T]; lodsw; mov cx,ax; mov dl,C; lodsw; mov di,ax; [add di,B]; mov es:[di],dl; [mov es:[di+320],dl]; loop` with its ES segment |
+| main-loop ranges | extra-gravity decay, the per-frame counters run that holds the sensor lockout, the drain loop and serve, the plunger lane (or EP8's launch block) with its `ball_lost_fade` call, nudge/tilt, and gravity + object scan (skipping `save_ball_bg` and, in physics mode, `ball_pixel_scan`) |
+| plunger | `cmp word [P],MAX; ja/jae; add word [P],STEP` in the lane block; EP8: `mov word [P],700` while held and the constant launch stores |
+| code-integrity window | the end of flipper_update, and every byte written through a `cs:` override below it |
+
+**Result: every item is found automatically in all 13 tables (`missing: []`).** The only overrides are EP1's. They keep the
+hand-verified EP1 values so that EP1 traces stay byte-identical: the first physics range is cs:06E2..0711, which also includes the
+kickback-gate timer that `gate_draw` uses to edit the collision buffer (the automatic range is the decay only, 06E2..06ED), and
+the original code-integrity window (cs:0000..4470 with its CS variables; the automatic window ends at flipper_update, cs:3E35).
+The EP1 original-side traces of all 45 scenarios, in physics and rules mode, are byte-identical before and after the change to
+per-table configs.
+
+Per-table variants found (cs/ds = entry code segment / data segment, unrelocated):
+
+| table | cs / ds | main loop / physics_step / flipper_update | outlines (colour) | level-0 wall lo..hi | plunger step/max | serve | extra gravity | sensor lockout | kicker cooldown | flipper y gates |
+|---|---|---|---|---|---|---|---|---|---|---|
+| EP1 | 3223 / 0015 | 04d2 / 1724 / 3cdd | 2 (DF) | CF..EF | 12/700 ja | (284,336) | ds:06d7 | ds:676b | ds:6769 | - |
+| EP2 | 3310 / 000e | 04ab / 1892 / 3d85 | 2 (DF) | CF..FF | 12/700 ja | (284,338) | - | ds:5562 | ds:5560 (+ x/y window) | - |
+| EP3 | 30e2 / 000e | 04af / 14a4 / 2ea3 | 2 (DF) | D0..EF | 12/700 ja | (297,350) | - | ds:4dcf | ds:4dcd | - |
+| EP4 | 304f / 000e | 04af / 1787 / 3786 | 4 (DF) | D1..FD | 10/400 jae | (284,336) | - | ds:595f | ds:595d | 300/310 |
+| EP5 | 2e2c / 000e | 04f3 / 129d / 24c6 | 2 (DF) | D0..EF | 12/700 jae | (297,346) vx=2 | - | ds:43de | = lockout | - |
+| EP6 | 33bb / 000e | 04e0 / 1701 / 339f | 2 (DF) | D0..EF | 12/700 ja | (297,346) vx=2 | - | ds:5c3a | = lockout | - |
+| EP7 | 30c4 / 000e | 047e / 1786 / 3a6e | 2 (FF) | E4..FF | 12/700 ja | (284,336) | - | ds:5532 | ds:5530 | - |
+| EP8 | 353a / 000e | 0459 / 1724 / 3ab1 | 2 (FF) | ds:04a7..FD | launch flag 700; launch (148,396) v=(-147,-600) | none | - | ds:5f3e | ds:5f3c | 300/310 |
+| EP9 | 309a / 000e | 0513 / 1893 / 3524 | 2 (DF) | D0..FD | 10/700 jae | (290,354) | ds:41bb | ds:418e (per ball ds:4183) | ds:4181 | 300 |
+| EP10 | 31a4 / 000e | 050c / 16c1 / 3783 | 2 (DF) | D1..FD | 10/800 jae | (284,336) | ds:38b6 | ds:388b (per ball ds:3880) | ds:387e | 300 |
+| EP11 | 2d1d / 000e | 050e / 1732 / 3774 | 2 (DF), 2 rows | D0..FD | 20/800 jae | (284,336) | ds:3781 | ds:3756 (per ball ds:374b) | ds:3749 | 300/310 |
+| EP12 | 2e82 / 000e | 049a / 161b / 37a2 | 3 (DF), 2 rows | D0..FD | 20/800 jae | (284,336) | ds:3744 | ds:3719 (per ball ds:370e) | ds:370c | 300/310 |
+| EP13 | 2b43 / 000e | 0497 / 15bc / 3475 | 2 (DF), 2 rows | D0..FD | 20/800 jae | (284,336) | ds:377d | ds:3752 (per ball ds:3747) | ds:3745 | 300/310 |
+
+Notes on the variants, all [H] from the code and exercised by the harness:
+* **EP4** draws 4 outlines on 2 key groups: the upper-left outline has no base offset, and the upper-right one is in the *top*
+  half (ES = `pf_seg_top`). **EP12** draws 3; its upper-right one is in the top half. **EP11-13** draw every outline pixel
+  twice (`mov es:[di+320],dl`, a second row). **EP7/EP8** draw with 0xFF.
+* **EP8**: the level-0 lower bound is the variable ds:04A7 (0xEB at boot; the drain code cs:0A5B resets it to 0xEB, and other
+  code sets 0xFF, collision.md section 8).
+  There is **no plunger lane and no serve**. While no ball is active (slots 0..2), holding the plunger sets ds:5AEC to 700.
+  On release the launch block (cs:0C3F..0C65) places slot 0 at (148,396) with v=(-147,-600). Its drain loop handles 3 slots;
+  physics_step runs 5.
+* **EP5/EP6** use one counter, ds:43DE / ds:5C3A, as both the sensor lockout and the kicker cooldown. They serve at (297,346)
+  with **vx = 2**.
+* **EP9-EP13** keep one sensor lockout per ball (the gravity loop copies `[di+ARR]` into the lockout before the scan) and have
+  no sensor cooldown.
+* **Flipper-kick y gates** (EP4, EP8-13): a flipper contact with ball y < 300 takes the plain wall path, so the upper flippers
+  reflect like walls. The top kick also needs y >= 310 in EP4, EP8, EP11-13.
+* **Gravity**: EP9-13 do `vy += g + extra - [sub]` (EP9: `sub ax,[41B9]`). EP3 adds +2 for slot 2 only (`cmp di,4; jne; add
+  [di+vy],2`). The exporter now writes both into engine.json (`gravity.terms`, `gravity.slot_bonus`).
+* **EP2's active surface** (cs:1A0F): D1/D2 are no contact; while the cooldown is set, CF/D0 are plain wall; outside x <= 260,
+  y >= 75 they are no contact; and a probe that fires the kicker is **not** added to the hit list (`jmp` past the append).
+  engine.json `kicker.{active_max, cooling_contact, window, contact_on_fire}` describes this.
+* Kicker cooldown values (frames): EP1, EP3, EP4 = 3; EP2, EP7, EP8 = 2; EP5, EP6, EP9-13 = 4. EP9-13 set it *before* the tilt test, so a
+  tilted contact still starts the cooldown (`kicker.cooldown_set_when_tilted`).
+
+## 11. Per-table scenario sets (`tools/emu/scenarios/EPn/`)
+
+`make_scenarios.py --table N` (or `--all` for EP2..EP13) calls `tools/emu/scenegen.py`. Without arguments, make_scenarios.py
+writes EP1's hand-made set exactly as before (verified byte-identical). The generator boots the table, warms up the flippers,
+and classifies the live collision buffer with the table's own wall LUT (`collision.json`; EP8 picks the LUT variant for the
+runtime value of ds:04A7). It reads the flipper rest outlines from the pointer tables named in EPn.json. Each candidate start
+is then **simulated on the original code** with probe capture (`EpEmu.capture_probes`: the buffer values under the probes of
+every response). A candidate is kept only if the first response of ball 0 is the advertised kind. The search is seeded per
+table and kind, so reruns give the same files (about 6 s per table).
+
+| kind | placement | verified |
+|---|---|---|
+| `plunger_launch`, `plunger_short` | the table's serve position; held until the charge saturates (from step/max/cmp) / 20 frames. EP8: slot 0 inactive, plunger held 10 frames | ball leaves the lane / is launched |
+| `fall_<o>_flipper_held/_released`, `<o>_flipper_shot` | above each rest outline `<o>` (`left`, `right`, `upper_left`, `upper_right`), straight drop through a clear corridor; for tucked-in upper flippers, aimed shots from nearby clear spots; shot = press 1..6 frames before landing | first contact is a flipper-colour probe on that outline; shot has `flipper_contact` set |
+| `bumper_hit[_i]`, `slingshot_hit[_i]` | kicker-colour clusters (active LUT class, 8-connected after 2 px dilation) above/below y=200, approached from 16 directions | first contact is on that cluster, with a kick |
+| `flat_wall_hit`, `flat_ceiling_hit`, `diagonal_wall_hit` | seeded random clear starts | first contact is plain wall with k in {1,25} / 13 / {7,19,31,43} |
+| `multi_bounce_upper` | best of 12 fast upper-playfield starts | 4+ responses |
+| `upper_layer_loop` | tables with 200+ level-1 wall pixels; best of 12 layer-1 starts near level-1 walls | 3+ responses |
+| `long_600_scripted` | launch, flips every 45 frames, drain + the table's own serve, second plunge | no hang (the flipper phase is shifted if the original livelocks) |
+
+Sets written (the generated EP1 set is a check of the generator): EP1 18, EP2 19, EP3 19, EP4 21 (all 4 flippers), EP5 18 (no
+upper-layer scenario: 78 level-1 pixels), EP6 19, EP7 19, EP8 13 (no bumper/slingshot: EP8's toys are not in its collision
+buffer, collision.md section 8; no `plunger_short`, since the launch is constant), EP9 18, EP10 18, EP11 18, EP12 21 (3 flippers),
+EP13 18. EP4 has one kicker cluster only: its slingshots are plain wall in its LUT (active is D1-D2). The scenario files are
+scenario JSON as in section 3 with `table: n`. New optional fields (additive): `ball.active`, `balls` (slots 1..4, as the Swift
+port reads them), `extra_balls` (explicit slots).
+
+## 12. Differential results per table (`diff_traces.py --table N`, physics mode, 2026-09-27)
+
+`diff_traces.py --table N` runs `tools/emu/scenarios/EPn/` (table 1: the old default dirs), passes `--table N` to the port, and
+writes traces to `scratch/diff/traces/EPn/`.
+
+| table | exact | diverging scenarios and first cause |
+|---|---|---|
+| EP1 (generated set) | 18/18 | - |
+| EP2 | 10/19 | all 9 = EP2's active-surface variant (section 10): the port kicks where the original has no contact (lane at x=265 > 260, D1/D2) or adds kicker probes to the hit list (k off by one) |
+| EP3 | 19/19 | - |
+| EP4 | 18/21 | the 3 upper-flipper scenarios: flipper-kick y gates (y < 300 -> plain wall) not in the port |
+| EP5, EP6 | 18/18, 19/19 | - (after the exporter fixes below) |
+| EP7 | 19/19 | - (0xFF flipper colour works) |
+| EP8 | 11/13 | `plunger_launch`, `long_600_scripted`: the port does not start with slot 0 inactive and has no launch block |
+| EP9, EP10, EP11, EP13 | 18/18 each | - (after the exporter fixes below) |
+| EP12 | 19/21 | the 2 upper-flipper scenarios: flipper-kick y gates |
+
+Total: 223 of 239 exact. Every divergence is a port feature that is missing, not a harness or exporter error. The data the
+port needs is now in engine.json: `kicker.window/active_max/cooling_contact/contact_on_fire`, `flipper_kick.side_min_y/top_min_y`,
+`plunger.kind/launch`, `serve.present`.
+
+Exporter errors this found and fixed (`tools/export_engine_data.py`; EP1's engine.json only gained keys):
+* kicker cooldown fell back to EP1's 3 in EP2, EP5 and EP9-13 because the call pattern assumed `jne +3`. It is now 2 (EP2)
+  and 4 (the others); EP7/EP8 (2) were already found. This fixed EP5, EP9, EP10 and EP13 bumper/ceiling scenarios.
+* serve fell back to EP1's (284,336) in EP5/EP6; the real serve is (297,346) with vx=2. This fixed EP6 `long_600_scripted`.
+* `ball_slots_initial` was missing for EP3 and EP9-13 (patterns tolerate EP3's `jne +3; jmp` and EP9-13's lockout copy).
+* tilt handling: `tilt_disables` was false for EP9-13 (their tilt test is `jne +3; jmp short`).
+
+Rules mode on the other tables (information for the rules port; `--mode rules`): EP7, EP9, EP10 and EP13 are fully exact.
+In EP3, 6 scenarios diverge from the first bumper contact on (the original has kick 4, the port 0), probably an EP3 sensor
+handler on the kicker colours; this was not investigated. The rest are the physics-mode causes above, or `RULES_GAP`s at
+handlers the port does not run.

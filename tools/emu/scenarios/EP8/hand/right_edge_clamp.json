@@ -1,0 +1,16 @@
+{
+ "name": "right_edge_clamp",
+ "table": 8,
+ "frames": 30,
+ "ball": {
+  "x": 296,
+  "y": 155,
+  "xf": 0,
+  "yf": 0,
+  "vx": 400,
+  "vy": 0
+ },
+ "description": "Ball at (296,155) v=(400,0) in open space at the right edge (EP8's buffer has no edge walls): physics_step clamps (u16) x > 0x130 to 0x130 (cs:17A8..17B0); x over the first 12 steps: [299, 302, 304, 304, 304, 304, 304, 304, 304, 304, 304, 304]. engine.json integration has no max_x.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

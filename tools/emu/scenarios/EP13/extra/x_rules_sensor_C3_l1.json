@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_C3_l1",
+ "table": 13,
+ "frames": 200,
+ "ball": {
+  "x": 296,
+  "y": 206,
+  "xf": 0,
+  "yf": 0,
+  "vx": -212,
+  "vy": -212,
+  "layer": 1
+ },
+ "mode": "rules",
+ "description": "rules mode, level 1: ball (296,206) v=(-212,-212) into the C3 sensor pixels around (271,181); the original dispatches C3 (handler cs:25c8) first at frame 22; colours seen in 40 frames: C3.",
+ "inputs": []
+}

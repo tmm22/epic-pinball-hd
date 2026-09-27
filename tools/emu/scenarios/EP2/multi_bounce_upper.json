@@ -1,0 +1,15 @@
+{
+ "name": "multi_bounce_upper",
+ "table": 2,
+ "frames": 300,
+ "ball": {
+  "x": 107,
+  "y": 64,
+  "xf": 0,
+  "yf": 0,
+  "vx": 250,
+  "vy": -350
+ },
+ "description": "Fast ball in the upper playfield, (107,64) with (250,-350): 44 responses in 286 frames.",
+ "inputs": []
+}

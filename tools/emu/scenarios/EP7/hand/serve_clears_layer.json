@@ -1,0 +1,18 @@
+{
+ "name": "serve_clears_layer",
+ "table": 7,
+ "frames": 40,
+ "ball": {
+  "x": 150,
+  "y": 385,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 300,
+  "layer": 1
+ },
+ "on_drain": "continue",
+ "description": "Ball on layer 1 (ramp level) at (150,385) v=(0,300) drains, on_drain=continue: EP7's serve (cs:0A04..0A27) puts ball 0 at (284,336) AND clears its level byte (ds:5539 = 0 at cs:0A27; EP1's serve cs:0A77..0A94 has no such store): layer 1 for 6 records, layer 0 from frame 2.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

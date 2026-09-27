@@ -1,0 +1,25 @@
+{
+ "format": "epic-pinball-engine-overrides/1",
+ "table": 3,
+ "exe": "EP3.EXE",
+ "note": "Additive patch for extracted/tables/EP3/engine.json: deep-merge 'patch' into the exporter's output (new keys only). export_engine_data.py does not read this directory yet. Only code addresses, small engine constants and flags; every value is cited in 'evidence' and was run on the original code (tools/emu/scenarios/EP3/hand/).",
+ "patch": {
+  "drain": {
+   "slots": 2,
+   "serve_when_empty": 2,
+   "clear_layer_on_drain": false,
+   "transfer": null
+  },
+  "plunger": {
+   "lane_layer_test": true
+  },
+  "nudge_impulse": {
+   "skip_slots": [2]
+  }
+ },
+ "evidence": {
+  "drain": "drain loop cs:0763 mov di,4 (slots 1 and 0 only; slot 2 is the captive ball, engine.json ball_slots_initial slot 2 active at (237,175)); serve when cx == 2 (cs:07A4 cmp cx,2; jne). A slot >= 2 is never drained and never counted. Harness: hand/captive_drain_serve serves ball 0 at frame 0 with the captive ball in play.",
+  "plunger.lane_layer_test": "cs:0887 cmp byte [ball_layer0 ds:4DD6],0; jne out (as EP1 cs:0AA4).",
+  "nudge_impulse.skip_slots": "collision_response cs:1A85 cmp di,4; je ret: slot 2 never gets the nudge impulse (cs:1A8A..1AC5)."
+ }
+}

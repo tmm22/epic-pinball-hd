@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_C2_l1",
+ "table": 11,
+ "frames": 200,
+ "ball": {
+  "x": 68,
+  "y": 185,
+  "xf": 0,
+  "yf": 0,
+  "vx": -57,
+  "vy": -138,
+  "layer": 1
+ },
+ "mode": "rules",
+ "description": "rules mode, level 1: ball (68,185) v=(-57,-138) into the C2 sensor pixels around (61,160); the original dispatches C2 (handler cs:2485) first at frame 16; colours seen in 40 frames: C2.",
+ "inputs": []
+}

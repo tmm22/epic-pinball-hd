@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_BC",
+ "table": 13,
+ "frames": 200,
+ "ball": {
+  "x": 249,
+  "y": 198,
+  "xf": 0,
+  "yf": 0,
+  "vx": 106,
+  "vy": -106,
+  "layer": 0
+ },
+ "mode": "rules",
+ "description": "rules mode, level 0: ball (249,198) v=(106,-106) into the BC sensor pixels around (263,198); the original dispatches BC (handler cs:270a) first at frame 0; colours seen in 40 frames: BC.",
+ "inputs": []
+}

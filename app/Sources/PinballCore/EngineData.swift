@@ -40,8 +40,107 @@ public struct EngineData: Decodable, Sendable {
     public var sensors: Sensors
     public var timing: Timing
     public var fallbacks: [String]
+    /// Code addresses of the patterns the exporter matched (hex cs offsets by name).
+    public var foundAt: [String: String]?
     /// The 5 ball slots as stored in the EXE's data image (inactive slots keep stale values).
     public var ballSlotsInitial: [BallSlot]?
+    /// drain_check variants (tools/engine_overrides/EPn.json; nil = the EP1 loop over 5 slots).
+    public var drain: Drain?
+    /// Main-loop collision-buffer gates driven by ball position only (EP6 cs:0979, EP9 cs:0550).
+    public var gates: [Gate]?
+
+    public struct Drain: Decodable, Sendable {
+        /// A multiball hand-over when a slot drains (EP2 cs:0A63..0AA3, EP4 cs:0A89..0ADA).
+        public struct Transfer: Decodable, Sendable {
+            public var fromSlots: [Int]
+            public var toSlot: Int
+            public var copies: [String]
+            /// Only while this DS byte is 1 (EP4 ds:08FC, rule state); cleared with `ruleVarsCleared` first.
+            public var requiresFlagVar: String?
+            public var ruleVarsCleared: [String]?
+            /// EP2: DS byte set to 0 after a transfer and when slots 1 and 2 are both inactive.
+            public var ruleVarCleared: String?
+        }
+        /// Slots scanned, highest first (EP3: 2, EP8: 3); default 5.
+        public var slots: Int?
+        /// Serve when this many scanned slots are empty; null = never serve (EP8). Default = slots.
+        public var serveWhenEmpty: Int?
+        public var serveWhenEmptyPresent: Bool { _serveNull != true }
+        var _serveNull: Bool?
+        public var clearLayerOnDrain: Bool?
+        public var transfer: Transfer?
+        /// Per drained slot, DS writes (EP8 cs:0A4F..0A8A): `[addr, width, value]` or nested `{if, then, else}`.
+        public var onDrainOps: [DSOp]?
+
+        enum CodingKeys: String, CodingKey { case slots, serveWhenEmpty, clearLayerOnDrain, transfer, onDrainOps }
+        public init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            slots = try c.decodeIfPresent(Int.self, forKey: .slots)
+            if c.contains(.serveWhenEmpty) {
+                if try c.decodeNil(forKey: .serveWhenEmpty) { _serveNull = true } else { serveWhenEmpty = try c.decode(Int.self, forKey: .serveWhenEmpty) }
+            }
+            clearLayerOnDrain = try c.decodeIfPresent(Bool.self, forKey: .clearLayerOnDrain)
+            transfer = try c.decodeIfPresent(Transfer.self, forKey: .transfer)
+            onDrainOps = try c.decodeIfPresent([DSOp].self, forKey: .onDrainOps)
+        }
+    }
+
+    /// A conditional DS write list: `[addr, width, value]` or `{"if": [addr, width, value], "then": [...], "else": [...]}`.
+    public indirect enum DSOp: Decodable, Sendable {
+        case write(addr: Int, width: Int, value: Int)
+        case branch(addr: Int, width: Int, equals: Int, then: [DSOp], else: [DSOp])
+        enum K: String, CodingKey { case `if`, then, `else` }
+        public init(from d: Decoder) throws {
+            if var u = try? d.unkeyedContainer() {
+                let a = try u.decode(String.self), w = try u.decode(Int.self), v = try u.decode(Int.self)
+                self = .write(addr: Int(a.dropFirst(2), radix: 16) ?? 0, width: w, value: v)
+                return
+            }
+            let c = try d.container(keyedBy: K.self)
+            var u = try c.nestedUnkeyedContainer(forKey: .if)
+            let a = try u.decode(String.self), w = try u.decode(Int.self), v = try u.decode(Int.self)
+            self = .branch(addr: Int(a.dropFirst(2), radix: 16) ?? 0, width: w, equals: v,
+                           then: try c.decodeIfPresent([DSOp].self, forKey: .then) ?? [],
+                           else: try c.decodeIfPresent([DSOp].self, forKey: .else) ?? [])
+        }
+    }
+
+    public struct Gate: Decodable, Sendable {
+        public struct PosTest: Decodable, Sendable {
+            public var flagNe: Int?
+            public var ball: Int?
+            public var xLe: Int?
+            public var xGe: Int?
+        }
+        public struct Pixels: Decodable, Sendable {
+            public var half: Int?
+            public var offsets: [Int]?
+        }
+        public struct SideVar: Decodable, Sendable { public var `var`: String; public var closed: Int; public var open: Int }
+        public var id: String
+        public var kind: String
+        public var flagVar: String?
+        public var closeIf: PosTest?
+        public var openIf: PosTest?
+        public var valueClosed: Int?
+        public var valueOpen: Int?
+        public var sideVar: SideVar?
+        /// One pixel list (ball-position gates); rule-timer gates have a list of them and run as rules glue.
+        public var pixelList: Pixels?
+        enum CodingKeys: String, CodingKey { case id, kind, flagVar, closeIf, openIf, valueClosed, valueOpen, sideVar, pixels }
+        public init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            kind = try c.decode(String.self, forKey: .kind)
+            flagVar = try c.decodeIfPresent(String.self, forKey: .flagVar)
+            closeIf = try c.decodeIfPresent(PosTest.self, forKey: .closeIf)
+            openIf = try c.decodeIfPresent(PosTest.self, forKey: .openIf)
+            valueClosed = try c.decodeIfPresent(Int.self, forKey: .valueClosed)
+            valueOpen = try c.decodeIfPresent(Int.self, forKey: .valueOpen)
+            sideVar = try c.decodeIfPresent(SideVar.self, forKey: .sideVar)
+            pixelList = try? c.decodeIfPresent(Pixels.self, forKey: .pixels)
+        }
+    }
 
     public struct BallSlot: Decodable, Sendable {
         public var active: Int, x: Int, y: Int, vx: Int, vy: Int, accx: Int, accy: Int, layer: Int
@@ -50,6 +149,8 @@ public struct EngineData: Decodable, Sendable {
     public struct Params: Decodable, Sendable {
         public var names: [String]
         public var values: [Int]
+        /// DS offset of the 10-word block (hex string), used to bind it for the rules interpreter.
+        public var ds: String?
     }
 
     public struct Integration: Decodable, Sendable {
@@ -61,12 +162,23 @@ public struct EngineData: Decodable, Sendable {
         public var minY: Int
         public var yReset: Int
         public var collisionYLimit: Int
+        /// Value stored when x < min_x (EP5 cs:1328 stores 0); default min_x.
+        public var minXSet: Int?
+        /// EP8 cs:17A8: (u16) x > max_x -> max_x, before the signed min_x test.
+        public var maxX: Int?
     }
 
     public struct Gravity: Decodable, Sendable {
         public var cutoff: Int
         public var extraVar: String?
         public var extraInitial: Int
+        public struct SlotBonus: Decodable, Sendable { public var slot: Int; public var add: Int }
+        public var slotBonus: SlotBonus?
+        /// Gravity terms after params.gravity: add/sub a DS word (EP9-13 subtract a second one).
+        public struct Term: Decodable, Sendable { public var op: String; public var `var`: String?; public var initial: Int? }
+        public var terms: [Term]?
+        /// Ball slots the gravity/sensor loop visits (EP9-13: 3); default 5.
+        public var slots: Int?
     }
 
     public struct ProbeRing: Decodable, Sendable {
@@ -78,17 +190,42 @@ public struct EngineData: Decodable, Sendable {
         public var codes: [String]
         /// Per level (0 table, 1 ramp): class code per palette index (256 entries).
         public var lut: [[Int]]
+        /// EP8 cs:185D: the level-0 lower bound is the DS byte [level0_lo_var] (EBh / FFh at run time);
+        /// indices below it are empty, the rest keep their class.
+        public var level0LoVar: String?
+        public var level0LoInitial: Int?
     }
 
     public struct OcclusionTable: Decodable, Sendable {
         public var codes: [String]
         public var lut: [[Int]]
         public var ranges: [[Int]]?
+        /// EP8 cs:16AF: level-0 bounds from DS: v <= [front_max] in front, v <= [occludes_max]
+        /// occludes the ball, v <= level0_sensor_max sensor, else in front.
+        public struct Bounds: Decodable, Sendable { public var frontMax: String; public var occludesMax: String }
+        public struct BoundsInitial: Decodable, Sendable { public var frontMax: Int; public var occludesMax: Int }
+        public var level0BoundsVars: Bounds?
+        public var level0BoundsInitial: BoundsInitial?
+        public var level0SensorMax: Int?
     }
 
     public struct Kicker: Decodable, Sendable {
         public var cooldownFrames: Int
         public var tiltDisables: Bool
+        // EP2 window / contact_on_fire, EP5/EP6 shared lockout, EP11-13 kick override
+        public struct WindowTest: Decodable, Sendable { public var coord: String; public var noContactIf: String; public var value: Int }
+        public struct KickConst: Decodable, Sendable { public var y: Int; public var kick: Int }
+        public var activeMax: Int?
+        public var window: [WindowTest]?
+        public var coolingContact: Bool?
+        public var contactOnFire: Bool?
+        public var cooldownIsSensorLockout: Bool?
+        public var cooldownSetWhenTilted: Bool?
+        public var requiresLayer0: Bool?
+        public var kickConstantWhenYAtLeast: KickConst?
+        /// EP11-13 kicker_hit: kick = `kick` when (u16) y >= `minY` (unreachable in practice).
+        public struct KickOverride: Decodable, Sendable { public var minY: Int?; public var kick: Int }
+        public var kickOverride: KickOverride?
     }
 
     public struct Collision: Decodable, Sendable {
@@ -102,10 +239,28 @@ public struct EngineData: Decodable, Sendable {
         public var vyZeroTop: Int
         public var fx: [Int]
         public var fy: [Int]
+        /// Flipper contacts with (u16) y < side_min_y take the plain push-out (EP4 cs:1B9B, EP12 cs:19C3).
+        public var sideMinY: Int?
+        public var topMinY: Int?
+        public struct UpperKick: Decodable, Sendable {
+            public struct Side: Decodable, Sendable {
+                public struct RuleTimer: Decodable, Sendable { public var `var`: String; public var size: Int; public var value: Int }
+                public var angleGroup: Int, dx: Int, dy: Int
+                public var vxSub: [Int], vySub: [Int]
+                public var ruleTimer: RuleTimer?
+            }
+            /// Side chosen by (u16) x >= split_x (EP4); nil = always `right` (EP11-13).
+            public var splitX: Int?
+            public var right: Side
+            public var left: Side?
+        }
+        public var upperKick: UpperKick?
     }
 
     public struct NudgeImpulse: Decodable, Sendable {
         public var minTimer: Int, dirMin: Int, dirMax: Int, vyShift: Int, vx: Int
+        /// Slots that never get the impulse (EP3 cs:1A85: the captive ball).
+        public var skipSlots: [Int]?
     }
 
     public struct FlipperGroup: Decodable, Sendable {
@@ -138,12 +293,41 @@ public struct EngineData: Decodable, Sendable {
         public var cmp: String
         public var laneMinX: Int
         public var laneMinY: Int
+        /// false: the lane guard has no ball_layer test (EP2 cs:0BB4, EP5, EP6); default true.
+        public var laneLayerTest: Bool?
+        /// "charge" (lane plunger) or "launch_flag" (EP8 cs:0B62: no lane, the ball is placed on release).
+        public var kind: String?
+        public struct Launch: Decodable, Sendable { public var x: Int, y: Int, vx: Int, vy: Int }
+        public var launch: Launch?
+        public var lanePresent: Bool?
+        /// EP8 cs:0B62..0C65 details (tools/engine_overrides/EP8.json).
+        public struct LaunchBlock: Decodable, Sendable {
+            public struct ServeDelay: Decodable, Sendable { public var `var`: String; public var opsAt1: [DSOp]? }
+            public struct Message: Decodable, Sendable { public var bx: String; public var ax: Int; public var di: String }
+            public var serveDelay: ServeDelay?
+            public var releaseDsOps: [DSOp]?
+            public var releaseMessage: Message?
+            public var flagVar: String?
+        }
+        public var launchBlock: LaunchBlock?
+        public var launchServeDelayVar: String? { launchBlock?.serveDelay?.var }
+        /// EP8 launch flag word (plunger.launch_block.flag_var).
+        public var launchFlagVar: String? { launchBlock?.flagVar }
     }
 
-    public struct Serve: Decodable, Sendable { public var x: Int, y: Int, delay: Int }
+    public struct Serve: Decodable, Sendable {
+        public var x: Int, y: Int, delay: Int
+        public var vx: Int?
+        /// Level byte stored for slot 0 (EP2 cs:0AFB: 1, EP7 cs:0A27: 0); nil = unchanged (EP1).
+        public var layer: Int?
+        /// false: the table has no serve code (EP8).
+        public var present: Bool?
+    }
 
     public struct Nudge: Decodable, Sendable {
         public var tiltAdd: Int, frames: Int, tiltThreshold: Int, laneMinX: Int, laneMaxY: Int
+        /// false (EP8 cs:0E23): no plunger-lane exemption, but some ball in slots 0..2 must be active.
+        public var laneTest: Bool?
     }
 
     public struct BallBall: Decodable, Sendable {
@@ -163,6 +347,42 @@ public struct EngineData: Decodable, Sendable {
         public var levels: [[String: SensorHandler]]
         /// Palette index that fires even while the event lockout is set (EP1 0xFE).
         public var alwaysFiresValue: Int
+        /// DS offsets (hex strings) of the physics variables the handlers use (`level`, `lockout`,
+        /// `obj_x`, `ball_x.0`, ...), used to bind them for the rules interpreter.
+        public var vars: [String: String]?
+        /// DS offsets the engine owns (rule code must not keep private copies of them).
+        public var forbiddenVars: [String]?
+        /// "word": a sensor pixel fires only under a non-zero ball-sprite word (EP2 cs:184F).
+        public var spriteMask: String?
+        /// Lockout-bypass value found in this table's scan; `alwaysFiresKnown` and nil = none (EP2, EP5, ...).
+        public var alwaysFires: Int?
+        public var alwaysFiresKnown = false
+        /// EP9-13: one sensor lockout per ball slot (array, stride, slots, scratch copy).
+        public struct LockoutPerBall: Decodable, Sendable {
+            public var array: String; public var stride: Int; public var slots: Int
+            public var scratch: String?; public var currentVar: String?
+        }
+        public var lockoutPerBall: LockoutPerBall?
+
+        /// Where the sensor handlers jump when done (the dispatcher's exit, hex cs offset).
+        public var exitIp: String?
+        enum CodingKeys: String, CodingKey { case levels, alwaysFiresValue, vars, forbiddenVars, spriteMask, alwaysFires, lockoutPerBall, exitIp }
+        public init(from d: Decoder) throws {
+            let c = try d.container(keyedBy: CodingKeys.self)
+            levels = try c.decode([[String: SensorHandler]].self, forKey: .levels)
+            alwaysFiresValue = try c.decode(Int.self, forKey: .alwaysFiresValue)
+            vars = try c.decodeIfPresent([String: String].self, forKey: .vars)
+            forbiddenVars = try c.decodeIfPresent([String].self, forKey: .forbiddenVars)
+            spriteMask = try c.decodeIfPresent(String.self, forKey: .spriteMask)
+            if c.contains(.alwaysFires) {
+                alwaysFiresKnown = true
+                alwaysFires = try c.decodeIfPresent(Int.self, forKey: .alwaysFires)
+            }
+            lockoutPerBall = try c.decodeIfPresent(LockoutPerBall.self, forKey: .lockoutPerBall)
+            exitIp = try? c.decodeIfPresent(String.self, forKey: .exitIp)
+        }
+        /// The value that fires during a lockout (nil = none).
+        public var lockoutBypass: Int? { alwaysFiresKnown ? alwaysFires : alwaysFiresValue }
     }
 
     public struct SensorHandler: Decodable, Sendable {

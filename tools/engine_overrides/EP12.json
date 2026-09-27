@@ -1,0 +1,54 @@
+{
+ "format": "epic-pinball-engine-overrides/1",
+ "table": 12,
+ "exe": "EP12.EXE",
+ "generated_by": "table-verification agent (EP10-13), 2026-09-27; hand-maintained",
+ "status": "tools/export_engine_data.py does not read tools/engine_overrides/ yet. Keys under 'set' are dotted engine.json paths the exporter should write (additively). No game data is stored here: tables are referenced by data-segment offset and word count and must be read from the user's EXE; the rest are code facts (small integers, addresses). cs/ds offsets are unrelocated, entry code segment / data segment as in tools/emu/tables/EPn.json.",
+ "set": {
+  "flipper_kick.gate_note": "if not null: a flipper contact with (u16) ball y < side_min_y does NOT take the side/tip kick: it takes the normal one-pixel push-out (x -= pushout[k].x, y += pushout[k].y, no y -= 1) on every iteration, and on the first response it still continues to the flipper top-kick branch (it is not a plain wall reflection). First response with (u16) y < top_min_y: the upper kick (flipper_kick.upper_kick) instead of the top kick.",
+  "flipper_kick.upper_kick": {
+   "vx_table": {
+    "ds": "0x374b",
+    "words": 10,
+    "signed": true
+   },
+   "vy_table": {
+    "ds": "0x3761",
+    "words": 10,
+    "signed": true
+   },
+   "angle_group": 1,
+   "dx": -1,
+   "dy": 1,
+   "vy_positive_to_zero": true,
+   "code": "cs:1a91..1abc",
+   "reachable": true,
+   "note": "first response only, flipper_contact != 0, (u16) y < top_min_y (after the push-out): if vy > 0 then vy = 0; y += 1; x -= 1; vx -= vx_table[a]; vy -= vy_table[a], a = angle of flipper group angle_group (the right group ds:4F67, whatever flipper_contact is); raw table values, not multiplied by params. Every contact with the upper-right flipper (outline y 123..152) takes this path. cs:1ae4..1b15 is an unreachable left-hand variant (no references)."
+  },
+  "sensors.lockout_per_ball": {
+   "array": "0x370e",
+   "stride": 2,
+   "slots": 3,
+   "scratch": "0x3719",
+   "copy_in": "cs:10cb",
+   "copy_out": "cs:110b",
+   "decrement": "cs:0871..089d (lockout[0], kicker_cooldown, lockout[1], lockout[2])",
+   "note": "the gravity/scan loop (3 slots) copies the ball's own lockout byte into the scratch lockout the handlers read/write before that ball's pixel scan and back after it; the per-frame counters decrement the 3 array bytes, not the scratch copy. There is no event_cooldown in this table."
+  },
+  "gravity.slots": 3,
+  "kicker.kick_override": {
+   "min_y": 360,
+   "kick": 3,
+   "code": "cs:191c cmp word [di+y],0x168; jae 1914 -> mov byte [kick],3",
+   "reachable": false,
+   "note": "no kicker-active pixel (D0..D2) lies at y >= 337 in this table, so never reached"
+  }
+ },
+ "evidence": {
+  "side gate": "cs:19c3 cmp byte [370b],0; je 1a29 | cs:19ca cmp word [di+4ce9],0x12c; jb 1a29 (push-out cs:1a29..1a38)",
+  "first-response + top gate": "cs:1a3c cmp byte [4eec],0; jne exit | cs:1a46 flipper_contact test | cs:1a50 cmp word [di+4ce9],0x136; jb 1a91",
+  "upper kick": "cs:1a91..1abc (verified on 17 original executions: scratch/tables/EP12/check_upper_kick.py)",
+  "per-ball lockout": "cs:10cb mov cl,[di+370e]; mov [3719],cl ... cs:110b mov al,[3719]; mov [di+370e],al",
+  "gravity loop": "cs:113f cmp di,6"
+ }
+}

@@ -1,0 +1,20 @@
+{
+ "name": "multiball_drain_transfer",
+ "table": 2,
+ "frames": 120,
+ "ball": {
+  "x": 150,
+  "y": 400
+ },
+ "description": "Slot 0 below the drain line, slot 1 alone in play: EP2 drain (cs:0A63..0AA3) moves slot 1 into slot 0 (active, x, y, vx, vy; not the accumulators or layer) and clears slot 1, so the trace of slot 0 continues with slot 1's ball from frame 0 and no serve happens.",
+ "balls": [
+  {
+   "x": 100,
+   "y": 200,
+   "vx": 100,
+   "vy": 0
+  }
+ ],
+ "on_drain": "continue",
+ "inputs": []
+}

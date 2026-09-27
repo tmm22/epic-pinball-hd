@@ -1,0 +1,26 @@
+{
+ "name": "x_rules_multiball_lockout_1",
+ "table": 10,
+ "frames": 120,
+ "ball": {
+  "x": 113,
+  "y": 155,
+  "xf": 0,
+  "yf": 0,
+  "vx": 250,
+  "vy": -250
+ },
+ "balls": [
+  {
+   "x": 200,
+   "y": 149,
+   "xf": 0,
+   "yf": 0,
+   "vx": 250,
+   "vy": -350
+  }
+ ],
+ "mode": "rules",
+ "description": "rules mode, 2 balls: ball 0 from diagonal_wall_hit, slot 1 from multi_bounce_upper. EP9-13 keep one sensor lockout per ball (ds:3880+2i, copied into ds:388b around each ball's pixel scan and decremented per frame per slot); a lockout set by one ball's handler must not block the other ball's sensors. The port with a single lockout diverges at record 24 (extra.layer).",
+ "inputs": []
+}

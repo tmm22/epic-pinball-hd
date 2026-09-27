@@ -1,0 +1,26 @@
+{
+ "format": "epic-pinball-engine-overrides/1",
+ "table": 7,
+ "exe": "EP7.EXE",
+ "note": "Additive patch for extracted/tables/EP7/engine.json: deep-merge 'patch' into the exporter's output (new keys only; nothing here renames or removes a key). export_engine_data.py does not read this directory yet. Only code addresses (cs:/ds: offsets in EP7's own segments), small engine constants and flags; nothing is copied from the game (pixel lists are referenced by their DS offset and read from the user's EXE). Every value is cited in 'evidence' and was run on the original code with the harness (scenarios in tools/emu/scenarios/EP7/hand/, generator scratch/tables/common/extra_scenarios.py).",
+ "patch": {
+  "serve": {
+   "layer": 0
+  },
+  "plunger": {
+   "lane_layer_test": true
+  },
+  "drain": {
+   "slots": 5,
+   "serve_when_empty": 5,
+   "clear_layer_on_drain": false,
+   "transfer": null
+  }
+ },
+ "evidence": {
+  "serve.layer": "serve cs:0A04..0A27: serve_delay 7, y 150h, vy 0, vx 0, x 11Ch, active 1, then cs:0A27 mov byte [ball_layer0 ds:5539],0 (EP1's serve cs:0A77..0A94 has no level store). Harness: hand/serve_clears_layer (layer-1 ball drains; original layer 0 from record 6, port keeps 1).",
+  "plunger.lane_layer_test": "lane guard cs:0A2F..0A4B tests active, ball_layer0 == 0 (cs:0A36), x >= 118h, y >= 0DCh, like EP1.",
+  "drain": "drain loop cs:09BE..0A02 (di = 10..2, slots 4..0; serve when cx == 5 at cs:09FF); the drained slot's rule vars [50EE]/[50F0]/[50F6] are cleared only when [50F6]==1 (rule state).",
+  "sensors.always_fires (already exported = 219)": "ball scan cs:1738 cmp al,0DBh; je 1741 (skips the lockout test at cs:173C). DB is the lane-reversal sensor h28c2. Harness: hand/db_bypasses_lockout (rules mode, event_lockout=20 poked: the reversal still happens; the port matches). Note for rules.py: rules.json sensors[DB].ignores_lockout is false, it should be true."
+ }
+}

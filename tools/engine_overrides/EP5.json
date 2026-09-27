@@ -1,0 +1,27 @@
+{
+ "format": "epic-pinball-engine-overrides/1",
+ "table": 5,
+ "exe": "EP5.EXE",
+ "note": "Additive patch for extracted/tables/EP5/engine.json: deep-merge 'patch' into the exporter's output (new keys only). export_engine_data.py does not read this directory yet. Only code addresses, small engine constants and flags; every value is cited in 'evidence' and was run on the original code (tools/emu/scenarios/EP5/hand/).",
+ "patch": {
+  "integration": {
+   "min_x_set": 0,
+   "min_x_note": "x < min_x (signed) -> x = min_x_set (EP1: min_x_set = min_x = 1)"
+  },
+  "plunger": {
+   "lane_layer_test": false
+  },
+  "drain": {
+   "slots": 5,
+   "serve_when_empty": 5,
+   "clear_layer_on_drain": false,
+   "transfer": null
+  }
+ },
+ "evidence": {
+  "integration.min_x_set": "cs:1321 cmp word [di+x],1; jge; cs:1328 mov word [di+x],0 (EP1 cs:17A8..17AF stores 1). Harness: hand/x_clamp_left (hit list differs from the port on the first step).",
+  "plunger.lane_layer_test": "lane guard cs:081D..0832 tests active, x >= 290, y >= 340 only (no ball_layer test).",
+  "drain": "drain loop cs:071C..0740 (slots 4..0, serve when cx == 5 at cs:073D; serve cs:0742..075F with vx = 2, already in engine.json serve.vx).",
+  "kicker.cooldown_is_sensor_lockout (already exported)": "one byte ds:43DE: dec cs:06F7..06FE, kicker gate cs:141A cmp byte [43DE],0; jne +9 (not +3), kicker sets 4 cs:1533, sensor handlers set 1/3/15 cs:1AC4..1D5F, pixel scan reads it cs:1233/1262. Harness: hand/bumper_hit_lockout."
+ }
+}

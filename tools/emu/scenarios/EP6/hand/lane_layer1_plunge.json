@@ -1,0 +1,17 @@
+{
+ "name": "lane_layer1_plunge",
+ "table": 6,
+ "frames": 90,
+ "ball": {
+  "x": 297,
+  "y": 346,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0,
+  "layer": 1
+ },
+ "description": "Ball on layer 1 at the serve position (297,346), plunger held 8 frames then released: EP6's lane guard (cs:0AD5..0AEA) tests active, x >= 0x122 and y >= 0x154 but not the level byte, so the plunger charges on layer 1 too (charge up to 96, lowest vy -60); EP1/EP7/EP9 test ball_layer[0] == 0 first.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": [4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+}

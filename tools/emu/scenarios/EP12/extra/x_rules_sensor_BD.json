@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_BD",
+ "table": 12,
+ "frames": 200,
+ "ball": {
+  "x": 75,
+  "y": 123,
+  "xf": 0,
+  "yf": 0,
+  "vx": -57,
+  "vy": -138,
+  "layer": 0
+ },
+ "mode": "rules",
+ "description": "rules mode, level 0: ball (75,123) v=(-57,-138) into the BD sensor pixels around (78,121); the original dispatches BD (handler cs:1f96) first at frame 0; colours seen in 40 frames: BB BC BD.",
+ "inputs": []
+}

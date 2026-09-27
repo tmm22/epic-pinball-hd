@@ -1,0 +1,87 @@
+{
+ "format": "epic-pinball-engine-overrides/1",
+ "table": 9,
+ "exe": "EP9.EXE",
+ "note": "Additive patch for extracted/tables/EP9/engine.json: deep-merge 'patch' into the exporter's output (new keys only; nothing here renames or removes a key). export_engine_data.py does not read this directory yet. Only code addresses (cs:/ds: offsets in EP9's own segments), small engine constants and flags; nothing is copied from the game (pixel lists are referenced by their DS offset and read from the user's EXE). Every value is cited in 'evidence' and was run on the original code with the harness (scenarios in tools/emu/scenarios/EP9/hand/, generator scratch/tables/common/extra_scenarios.py).",
+ "patch": {
+  "gates": [
+   {
+    "id": "lane_exit_one_way",
+    "kind": "ball_position",
+    "when": "every_frame, main-loop order: right after the extra-gravity decay (EP9 cs:0550), before the per-frame counters",
+    "flag_var": "0x04fd",
+    "open_if": {
+     "ball": 0,
+     "x_ge": 280,
+     "every_frame": true
+    },
+    "close_if": {
+     "flag_ne": 1,
+     "ball": 0,
+     "x_le": 215
+    },
+    "pixels": {
+     "list": "0x04fe",
+     "list_format": "u16 count, then count u16 offsets",
+     "half": 0
+    },
+    "value_closed": 250,
+    "value_open": 192,
+    "draw_ip": "0x4091",
+    "also_drawn_by": "ball_lost_fade cs:2F4E (flag=0) / cs:2F53"
+   },
+   {
+    "id": "lane_diverter_timer",
+    "kind": "rule_timer",
+    "timer_var": "0x3f1e",
+    "timer_set_by": "sensor handler cs:241A (120 frames)",
+    "on_expiry": "cs:059D..05BF: [3EED+i]=0, [3EAC+i]=2, [3EAE+i]=2 for i=0,1; [3ED0]=1; [3EE8]=1; draw",
+    "state_var": "0x3ee8",
+    "pixels": [
+     {
+      "list": "0x051c",
+      "half": 1,
+      "value_if_state_1": 250,
+      "value_if_state_0": 1
+     },
+     {
+      "list": "0x053e",
+      "half": 1,
+      "value_if_state_1": 1,
+      "value_if_state_0": 250
+     }
+    ],
+    "draw_ip": "0x40b0",
+    "state_0_by": "ball_lost_fade cs:2D44 (then cs:2D49 draw)"
+   }
+  ],
+  "gravity": {
+   "slots": 3
+  },
+  "sensors": {
+   "lockout_per_ball": {
+    "array": "0x4183",
+    "stride": 2,
+    "slots": 3,
+    "current_var": "0x418e"
+   }
+  },
+  "plunger": {
+   "lane_layer_test": true
+  },
+  "drain": {
+   "slots": 5,
+   "serve_when_empty": 5,
+   "clear_layer_on_drain": false,
+   "transfer": null
+  }
+ },
+ "evidence": {
+  "gates[0]": "cs:0550 cmp word [ball_x0 ds:4EFA],118h; jb 0560; cs:0558 mov byte [04FD],0; call 4091 (every frame while x >= 280); cs:0560 cmp byte [04FD],1; je 0577; cmp word [4EFA],0D7h; ja 0577; mov byte [04FD],1; call 4091. cs:4091: ES=[50F4] (pf_seg_top), dl = FAh if [04FD]==1 else C0h; si=04FE: lodsw count, per pixel lodsw offset, mov es:[di],dl. The 14 pixels are the diagonal (246,31)..(233,44), A8h at boot. No rule state involved. Harness: tools/emu/tables/EP9.json override (physics range cs:0545..0577); hand/gate_one_way_hit (original contact k=43 at frame 1 step 1 on the gate, port none) and the generated multi_bounce_upper (record 34).",
+  "gates[1]": "cs:058B..05C2 (timer), cs:40B0..40E1 (draw: ES=[50F6] pf_seg_bottom; dl=FAh, dh=01h if [3EE8]==1 else swapped; list 051C (16 px, (269,337)..(284,352)) gets dl, list 053E (30 px, x=286, y 322..351) gets dh). Rule-driven; added to the harness rules mode only.",
+  "gravity.slots": "gravity + scan loop cs:131A mov di,0 .. cs:13BA cmp di,6 (slots 0..2; EP1/EP6/EP7/EP8 loop to di=10, 5 slots). Not visible in slot-0 traces (ball-ball pairs are 0-1, 0-2, 1-2 only).",
+  "gravity.terms (already exported)": "cs:132F mov ax,[41B5] (params.gravity); add ax,[41BB]; sub ax,[41B9]; add [di+vy],ax. [41B9] = 2 by a sensor handler (cs:2826), 0 at ball end (cs:2D4C). Harness: hand/extra_gravity_fall ([41BB]=30 poked; the port matches).",
+  "sensors.lockout_per_ball": "cs:1346 mov cl,[di+4183]; mov [418E],cl (before the scan), cs:1386 mov al,[418E]; mov [di+4183],al (after); per-frame decrements cs:0B0D..0B39 of [4183], [4181] (kicker cooldown), [4185], [4187]. The port has one eventLockout; equivalent for a single ball, differs with 2+ balls in rules mode (not exercised: EP9's rules.json does not load in the port).",
+  "kicker.cooldown_set_when_tilted (already exported)": "kicker_hit cs:1B32 mov byte [4181],4; cs:1B37 mov byte [00C2],0; cs:1B3C tilted -> ret. Harness: hand/tilted_bumper_hit (the port matches: no physics effect while tilted)."
+ }
+}

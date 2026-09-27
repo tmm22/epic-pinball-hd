@@ -1,0 +1,15 @@
+{
+ "name": "diagonal_wall_hit",
+ "table": 5,
+ "frames": 120,
+ "ball": {
+  "x": 57,
+  "y": 248,
+  "xf": 0,
+  "yf": 0,
+  "vx": -250,
+  "vy": 250
+ },
+ "description": "Ball at (57,248) with v=(-250,250): first contact frame 6 step 2 is plain wall (colours EB), k=43, no kicker.",
+ "inputs": []
+}

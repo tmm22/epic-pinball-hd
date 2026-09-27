@@ -1,0 +1,17 @@
+{
+ "name": "db_lane_reverse",
+ "table": 7,
+ "frames": 60,
+ "ball": {
+  "x": 152,
+  "y": 10,
+  "xf": 0,
+  "yf": 0,
+  "vx": -200,
+  "vy": 0
+ },
+ "mode": "rules",
+ "description": "Rules mode. Ball at (152,10) v=(-200,0) crosses the 0xDB diagonal (136,7)..(145,26): handler cs:28C2 reverses vx and moves x by +3 (first vx>0 at frame 2).",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

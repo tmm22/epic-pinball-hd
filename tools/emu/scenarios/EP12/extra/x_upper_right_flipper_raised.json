@@ -1,0 +1,15 @@
+{
+ "name": "x_upper_right_flipper_raised",
+ "table": 12,
+ "frames": 120,
+ "ball": {
+  "x": 175,
+  "y": 79,
+  "xf": 0,
+  "yf": 0,
+  "vx": -40,
+  "vy": 144
+ },
+ "description": "upper-right flipper held up (angle 0, not moving) when the ball lands at frame 7 step 1 (k=43): flipper_contact 0, plain wall response.",
+ "inputs": [0,0,2,2,2,2,2,2,2,2,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+}

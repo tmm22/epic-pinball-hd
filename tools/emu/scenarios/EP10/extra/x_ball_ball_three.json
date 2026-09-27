@@ -1,0 +1,33 @@
+{
+ "name": "x_ball_ball_three",
+ "table": 10,
+ "frames": 150,
+ "ball": {
+  "x": 168,
+  "y": 238,
+  "xf": 0,
+  "yf": 0,
+  "vx": 260,
+  "vy": -30
+ },
+ "balls": [
+  {
+   "x": 196,
+   "y": 238,
+   "xf": 0,
+   "yf": 0,
+   "vx": -260,
+   "vy": -30
+  },
+  {
+   "x": 182,
+   "y": 212,
+   "xf": 0,
+   "yf": 0,
+   "vx": 0,
+   "vy": 300
+  }
+ ],
+ "description": "3 balls in open space, ball 0 at (168,238); ball_ball_collide (cs:1d3e) first runs at step 3 before any wall contact of ball 0; pairs (di,si) [(0, 2), (0, 4), (2, 4)] in the first 12 frames.",
+ "inputs": []
+}

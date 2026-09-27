@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
-"""Write the scenario set tools/emu/scenarios/*.json (EP1).
+"""Write the scenario sets: EP1's hand-made set (tools/emu/scenarios/*.json) and generated
+per-table sets (tools/emu/scenarios/EPn/*.json).
 
-Start positions were chosen with the harness itself: every start box is clear of solid
+EP1 set: start positions were chosen with the harness itself: every start box is clear of solid
 colours (with a 3 px margin, except the lane/plunger start which is the game's own serve
 position) and the first contact of each wall/bumper scenario was checked to be of the
 advertised kind (see docs/formats/emulation.md, "Scenario set").
 
-  .venv/bin/python tools/emu/make_scenarios.py
+Per-table sets (tools/emu/scenegen.py): plunger, flipper, bumper/slingshot, wall and long
+scripted runs placed from each table's own geometry and verified on the original code.
+
+  .venv/bin/python tools/emu/make_scenarios.py              # EP1 hand-made set (as before)
+  .venv/bin/python tools/emu/make_scenarios.py --table 4 12 # generated sets -> scenarios/EP4/, EP12/
+  .venv/bin/python tools/emu/make_scenarios.py --all        # generated sets for EP2..EP13
+  (--table 1 writes a generated EP1 set to scenarios/EP1/, a check of the generator;
+   the hand-made EP1 files stay where they are)
 """
+import argparse
+import glob
 import json
 import os
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, 'scenarios')
@@ -230,10 +241,10 @@ H['hang_fast_upward'] = dict(
     frames=40, ball=ball(192, 156, vx=-570, vy=-1916))
 
 
-def write_set(S, out):
+def write_set(S, out, table=1):
     os.makedirs(out, exist_ok=True)
     for name, s in S.items():
-        scn = dict(name=name, table=1, frames=s['frames'], ball=s['ball'], inputs=s.get('inputs', []),
+        scn = dict(name=name, table=table, frames=s['frames'], ball=s['ball'], inputs=s.get('inputs', []),
                    description=s['description'])
         for k in ('on_drain', 'mode', 'pokes'):
             if k in s:
@@ -245,7 +256,27 @@ def write_set(S, out):
             f.write(text)
 
 
+def write_generated(n):
+    sys.path.insert(0, HERE)
+    import scenegen
+    G, t = scenegen.generate(n, log=lambda m: print(m, file=sys.stderr))
+    out = os.path.join(OUT, f'EP{n}')
+    for old in glob.glob(os.path.join(out, '*.json')):   # stale files of kinds no longer found
+        os.remove(old)
+    write_set(G, out, table=n)
+    print(f'EP{n}: wrote {len(G)} scenarios to {os.path.relpath(out)}: {" ".join(G)}')
+    return G
+
+
 def main():
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    ap.add_argument('--table', type=int, nargs='+', help='generate per-table sets (scenarios/EPn/)')
+    ap.add_argument('--all', action='store_true', help='generate sets for EP2..EP13')
+    a = ap.parse_args()
+    if a.table or a.all:
+        for n in (a.table or []) + (list(range(2, 14)) if a.all else []):
+            write_generated(n)
+        return
     write_set(S, OUT)
     write_set(A, OUT)
     write_set(H, os.path.join(HERE, 'scenarios_pathological'))

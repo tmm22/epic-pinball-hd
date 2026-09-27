@@ -1,0 +1,13 @@
+{
+ "name": "x_clamp_left",
+ "table": 5,
+ "frames": 30,
+ "ball": {
+  "x": 1,
+  "y": 200,
+  "vx": -300,
+  "vy": 0
+ },
+ "description": "Ball box at x=1 moving left: EP5 integration clamps x<1 to x=0 (cs:1321..1328; EP1 clamps to 1, cs:17A8..17AF). engine.json integration.min_x is hard-coded 1 by the exporter.",
+ "inputs": []
+}

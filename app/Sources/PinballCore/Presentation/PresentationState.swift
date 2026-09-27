@@ -22,6 +22,18 @@ public struct PresentationState: Sendable {
     public var soundEvents: [SoundEvent] = []
     /// Music request (song index into SONGn.PSM + order/position), if changed.
     public var music: MusicRequest? = nil
+    /// Raw lamp state byte per slot (0 off, 1/2 draw a/b once, 3/4 blinking, 5/6 steady a/b;
+    /// sprites.md 3.1). `lamps[i]` is whether sprite "a" is currently drawn.
+    public var lampStates: [UInt8] = []
+    /// Number of players in the game (1...4); `scores` has one entry per player.
+    public var playerCount: Int = 1
+    /// Score-strip text drawn this frame (draw_text calls), in order.
+    public var texts: [TextRef] = []
+    /// The game has ended (the original enters its game-over menu here).
+    public var gameOver: Bool = false
+    /// Per lamp slot, which overlay record lamp_update blitted last: 0 = none since boot (the
+    /// playfield shows through), 1 = record "a", 2 = record "b" (`RulesRuntime.lampDrawn`).
+    public var lampSprites: [UInt8] = []
 
     public init() {}
 }
@@ -37,8 +49,38 @@ public struct MessageRef: Sendable, Equatable {
     public var exeOffset: Int
     public var mode: UInt8
     public var framesRemaining: Int
+    /// Offset of the string in the table's data segment (-1 if unknown).
+    public var dsOffset: Int = -1
+    /// The full mode word the rules passed (AX: AH = font/centring, AL = effect = `mode`).
+    public var modeWord: UInt16 = 0
+    /// Display position word (DI) the rules passed.
+    public var position: Int = 0
+    /// The live string bytes (up to the terminating 0) at the time of the frame; rules patch
+    /// digits into their strings, so this can differ from the bytes at `exeOffset`.
+    public var bytes: [UInt8] = []
+    /// EP9-13 dot colour index for this message (set from a DS byte before the call); -1 = unknown,
+    /// the renderer uses the table's default.
+    public var colour: Int = -1
     public init(exeOffset: Int, mode: UInt8, framesRemaining: Int) {
         self.exeOffset = exeOffset; self.mode = mode; self.framesRemaining = framesRemaining
+    }
+}
+
+/// A text line drawn by rule code: string by EXE/DS offset plus its live bytes, position word (DI)
+/// and the drawing routine (cs offset in the table's code segment). draw_text (EP1 cs:59AC, font5)
+/// and draw_text_hi (cs:5926, font8) append the line to the active dot message (they check and
+/// advance its line pointer [0x50C]); they are not score-strip text.
+public struct TextRef: Sendable, Equatable {
+    public var exeOffset: Int
+    public var dsOffset: Int
+    public var position: Int
+    public var routine: Int
+    public var bytes: [UInt8]
+    /// EP9-13 dot colour index (-1 = unknown), as `MessageRef.colour`.
+    public var colour: Int = -1
+    public init(exeOffset: Int, dsOffset: Int, position: Int, routine: Int, bytes: [UInt8]) {
+        self.exeOffset = exeOffset; self.dsOffset = dsOffset; self.position = position
+        self.routine = routine; self.bytes = bytes
     }
 }
 

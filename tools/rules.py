@@ -293,6 +293,13 @@ class Table:
 
         # ball working copy + writeback: "cmp byte [W],0; je; mov ax,[O]; mov [di+ARR],ax" x4
         self.ball_arrays = {"x": bx_, "y": int(wl["ball_y_var"], 16)}
+        # slot arrays: from the emulator harness's search when available (EP3/EP5/EP6 lay them out differently
+        # from EP1); EP1's offsets otherwise (identical for EP1)
+        self.emu_cfg = _emu_config(self.n, self.path)
+        ecfg = (self.emu_cfg or {}).get("ds_vars", {})
+        field_of = {bx_: "x", bx_ + 0x0C: "y", bx_ - 0x46: "vx", bx_ - 0x3A: "vy"}
+        if all(k in ecfg for k in ("ball_x", "ball_y", "ball_vx", "ball_vy")) and ecfg["ball_x"] == bx_:
+            field_of = {ecfg["ball_x"]: "x", ecfg["ball_y"]: "y", ecfg["ball_vx"]: "vx", ecfg["ball_vy"]: "vy"}
         for a, (i, _) in self.all_insns():
             if i.mnemonic == "cmp" and i.op_str.endswith(", 0") and i.operands[0].size == 1:
                 w = self.mem_disp(i, 0)
@@ -314,7 +321,7 @@ class Table:
                 if len(pairs) == 4 and any(arr == bx_ for _, arr in pairs):
                     R[w] = ("ball.writeback", 1)
                     for o, arr in pairs:
-                        field = {bx_: "x", bx_ + 0x0C: "y", bx_ - 0x46: "vx", bx_ - 0x3A: "vy"}.get(arr)
+                        field = field_of.get(arr)
                         if field is None:
                             self.notes.append(f"unexpected writeback array {h(arr)}")
                             continue
@@ -323,9 +330,15 @@ class Table:
                     break
         if "vx" not in self.ball_arrays:
             self.notes.append("ball working copy not found")
-        self.ball_arrays.setdefault("active", bx_ - 0x0C)
-        self.ball_arrays.setdefault("vx", bx_ - 0x46)
-        self.ball_arrays.setdefault("vy", bx_ - 0x3A)
+        # keyboard flags (set by the int 9 handler in CS) read by rule code -> ["input", name]
+        if self.n == 1:
+            self.cs_inputs = dict(EP1_CS_INPUTS)
+        else:
+            csv = (self.emu_cfg or {}).get("cs_vars", {})
+            self.cs_inputs = {csv[k]: nm for k, nm in (("key_lflip", "flipper_left"), ("key_rflip", "flipper_right")) if k in csv}
+        self.ball_arrays.setdefault("active", ecfg.get("ball_active", bx_ - 0x0C))
+        self.ball_arrays.setdefault("vx", ecfg.get("ball_vx", bx_ - 0x46))
+        self.ball_arrays.setdefault("vy", ecfg.get("ball_vy", bx_ - 0x3A))
 
         # score: most common "add word [S], imm ; adc word [S+2], imm"
         cnt = Counter()
@@ -522,11 +535,11 @@ class Table:
                 t = self.mem_disp(i, 0)
                 if t is not None and t not in R:
                     R[t] = ("sensor_cooldown", 1)
-        # kicker: "mov al,[param]; mov [K],al; mov byte [C],3"
+        # kicker: "mov al,[param]; mov [K],al; mov byte [C],3" (EP3 cs:175F: through ah)
         for k in self.kicker_routines:
             s = self.seq(k, 12)
             for x, i in enumerate(s):
-                if i.mnemonic == "mov" and i.op_str.startswith("byte ptr [") and i.op_str.endswith(", al") and x + 1 < len(s):
+                if i.mnemonic == "mov" and i.op_str.startswith("byte ptr [") and i.op_str.endswith((", al", ", ah")) and x + 1 < len(s):
                     R.setdefault(self.mem_disp(i, 0), ("kick_strength", 1))
                     nx = s[x + 1]
                     if nx.mnemonic == "mov" and nx.op_str.startswith("byte ptr [") and nx.operands[1].type == X.X86_OP_IMM:
@@ -565,6 +578,7 @@ class Table:
                 R.setdefault(ctrl, (f"{gid}.open", 1))
         for rt in self.kicker_routines:
             self.routines.setdefault(rt, "kicker")
+
         seen = Counter()
         for a_ in sorted(R):
             name, w = R[a_]
@@ -572,6 +586,27 @@ class Table:
             if seen[name] > 1:
                 R[a_] = (f"{name}#{seen[name]}", w)
                 self.notes.append(f"duplicate role {name} at {h(a_)} renamed")
+
+    def far_ds_display(self, tgt):
+        """A display routine that switches DS to a constant (graphics library) segment before any memory
+        write: "[cld|push r|pusha]*; mov dx|ax,SEG; mov ds,dx|ax".  It cannot touch the table's DS state,
+        so rule code calling it is lifted with a display op (EP4 cs:c5cb, EP6 cs:41a0, EP8 cs:a42f).
+        Not applied to EP1, whose rule code calls no such routine."""
+        if self.n == 1:
+            return False
+        body = self.seq(tgt, 8)
+        for k, j in enumerate(body[:-1]):
+            if j.mnemonic == "mov" and j.op_str in ("ds, dx", "ds, ax", "ds, cx"):
+                prev = body[k - 1] if k else None
+                # EP9 cs:A48D: "pusha; push ds; mov cx, cs; mov ds, cx" (a sprite blit reading its table via DS = CS)
+                if (prev is not None and prev.mnemonic == "mov" and prev.op_str == j.op_str[4:] + ", cs"
+                        and all(b.mnemonic in ("push", "pusha", "pushaw", "cld") for b in body[:k - 1])):
+                    return True
+                return (prev is not None and prev.mnemonic == "mov" and prev.op_str.startswith(("dx, 0x", "ax, 0x"))
+                        and prev.operands[1].imm != self.ds
+                        and all(b.mnemonic in ("push", "pusha", "pushaw", "cld", "mov") and b.operands and
+                                b.operands[0].type != X.X86_OP_MEM or b.mnemonic in ("pusha", "pushaw", "cld") for b in body[:k]))
+        return False
 
     # -- role lookup -----------------------------------------------------------
     def role_of(self, a):
@@ -607,6 +642,8 @@ class Lifter:
         self.stub_routines = {}  # display-only routines called from rule code
         self.kicker_blocks = set()
         self.unsupported = Counter()
+        self.flags_in = {}       # block start -> flags state at entry (flag joins only)
+        self.capture_end = set()  # blocks whose final flags are captured into fa/fb for a join
 
     def is_epilogue(self, a):
         b = self.t.code[a:a + 3]
@@ -619,7 +656,9 @@ class Lifter:
         while work:
             a = work.pop()
             while True:
-                if a in self.stops or self.is_epilogue(a):
+                # a hook may start where an adjacent hook stops: the entry itself is lifted, only
+                # control flow reaching it from elsewhere ends there
+                if (a in self.stops and a != entry) or self.is_epilogue(a):
                     break
                 if a in self.body:
                     break
@@ -699,6 +738,12 @@ class Lifter:
     def label(self, a):
         return f"L{a:04x}"
 
+    def note_stops(self, end, then_ip, else_ip):
+        """Which hook stop a branch returns at (additive `stops_at`: the runtime follows `continues`)."""
+        at = {k: h(a) for k, a in (("then", then_ip), ("else", else_ip)) if a in self.stops}
+        if at:
+            end["stops_at"] = at
+
     def target(self, a):
         return "@return" if (a in self.stops or self.is_epilogue(a)) else self.label(a)
 
@@ -765,6 +810,72 @@ class Lifter:
         for s in sorted(self.leaders):
             if s in self.body and s not in self.blocks:
                 self.blocks[s] = self.lift_block(s)
+        self.resolve_flag_joins()
+
+    FLAG_SETTERS = ("cmp", "test", "add", "sub", "and", "or", "xor", "inc", "dec", "neg", "shl", "shr", "sar", "sal",
+                    "adc", "sbb", "rcl", "rcr", "rol", "ror", "mul", "imul", "div", "idiv", "sahf", "popf", "stc", "clc", "cmc")
+
+    def resolve_flag_joins(self):
+        """A conditional jump whose flags were set in an earlier block (EP8 kicker cs:1b20: `jne` after a
+        join of two compare paths) lifts as ["flags"].  If every block that can supply those flags (walking
+        back through blocks that do not touch them) ends with a compare of the same width, those blocks
+        copy their operands into fa/fb and the join block starts with flags cmp(fa, fb)."""
+        preds = {}
+        for a, b in self.blocks.items():
+            e = b["end"]
+            for k in ("goto", "then", "else"):
+                if k in e and e[k] != "@return" and e[k][1:] != "return":
+                    preds.setdefault(int(e[k][1:], 16), []).append(a)
+
+        def sets_flags(a):
+            insns, _ = self.block_insns(a)
+            return any(i.mnemonic in self.FLAG_SETTERS for i in insns[:-1] if not (i.mnemonic in JCC)) or \
+                (insns and insns[-1].mnemonic in self.FLAG_SETTERS)
+
+        def final_flags(a):
+            """(kind, width) of the last flag setter in block a, or None."""
+            insns, _ = self.block_insns(a)
+            for i in reversed(insns):
+                if i.mnemonic in ("cmp", "sub"):
+                    return ("cmp", i.operands[0].size)
+                if i.mnemonic in self.FLAG_SETTERS:
+                    return None
+            return "none"
+
+        todo = [a for a, b in self.blocks.items() if "if" in b["end"] and b["end"]["if"].get("a") == ["flags"]]
+        changed = False
+        for s in todo:
+            insns, _ = self.block_insns(s)
+            if any(i.mnemonic in self.FLAG_SETTERS for i in insns[:-1]):
+                continue                      # flags set inside the block: not a join problem
+            sources, work, seen, ok = set(), list(preds.get(s, [])), set(), True
+            while work and ok:
+                p = work.pop()
+                if p in seen:
+                    continue
+                seen.add(p)
+                ff = final_flags(p)
+                if ff == "none":
+                    if p in self.entries or not preds.get(p):
+                        ok = False
+                    work += preds.get(p, [])
+                elif ff is None:
+                    ok = False
+                else:
+                    sources.add((p, ff[1]))
+            if not ok or not sources or len({w for _, w in sources}) != 1:
+                continue
+            w = next(iter(sources))[1]
+            for p, _ in sources:
+                self.capture_end.add(p)
+                del self.blocks[p]
+            self.flags_in[s] = ("cmp", ["reg", "fa"], ["reg", "fb"], w)
+            del self.blocks[s]
+            changed = True
+        if changed:
+            for a in sorted(self.leaders):
+                if a in self.body and a not in self.blocks:
+                    self.blocks[a] = self.lift_block(a)
         self.dce()
 
     # -- block lifting ---------------------------------------------------------
@@ -774,7 +885,7 @@ class Lifter:
         regs = {}
         ops = []
         es = list(self.es_in.get(start, ["?"]))
-        F = [None]  # flags: (kind, a, b, width)
+        F = [self.flags_in.get(start)]  # flags: (kind, a, b, width); live-in flags only at flag joins
         end = None
 
         def R(r):
@@ -799,6 +910,8 @@ class Lifter:
             if f is None:
                 return
             kind, a, b, w = f
+            if a is None:                      # nothing to capture (e.g. the carry state after a gosub)
+                return
             if a == ["reg", "fa"] and (b is None or is_const(b) or b == ["reg", "fb"]):
                 return
             ops.append({"op": "reg", "r": "fa", "val": a})
@@ -994,6 +1107,12 @@ class Lifter:
                             continue
                         raise NotImplementedError("adc")
                     if m == "sbb":
+                        # "sub r1,a; sbb r2,b": 32-bit subtract in a register pair (borrow = r1_before < a, unsigned)
+                        f = F[0]
+                        if f and f[0] == "sub":
+                            write(0, ["sub", ["sub", a_, b_], ["ltu", f[1], f[2], f[3]]])
+                            F[0] = ("res", read(0) if i.operands[0].type == X.X86_OP_MEM else get(i.reg_name(i.operands[0].reg)), None, w)
+                            continue
                         raise NotImplementedError("sbb")
                     res = simp([m, a_, b_])
                     write(0, res)
@@ -1025,6 +1144,14 @@ class Lifter:
                         carry = ["unknown", h(i.address)]
                     write(0, [{"sal": "shl"}.get(m, m), src, n])
                     F[0] = ("shiftc", read(0), carry, w)
+                elif m == "rcl" and F[0] and F[0][0] == "shiftc" and ops_n > 1 and is_const(read(1)) and read(1) == 1 \
+                        and not (isinstance(F[0][2], list) and F[0][2][0] == "unknown"):
+                    # "shl lo,1; rcl hi,1": 32-bit shift left, the carry is the bit shifted out of lo (EP4, EP7)
+                    w = i.operands[0].size
+                    src = read(0)
+                    carry = F[0][2]
+                    write(0, ["or", ["shl", src, 1], carry])
+                    F[0] = ("shiftc", read(0), simp(["and", ["shr", ["and", src, 0xFF if w == 1 else 0xFFFF], 8 * w - 1], 1]), w)
                 elif m == "mul":
                     w = i.operands[0].size
                     src = read(0)
@@ -1051,16 +1178,20 @@ class Lifter:
                     put("ax", ["sext8", get("al")])
                 elif m in JCC:
                     end = {"if": self.cond(F[0], m), "then": self.target(i.operands[0].imm), "else": self.target(i.address + i.size)}
+                    self.note_stops(end, i.operands[0].imm, i.address + i.size)
                 elif m == "loop":
                     put("cx", ["sub", R("cx"), 1])
                     materialize(lambda e: True)
                     end = {"if": {"cmp": "ne", "a": ["reg", "cx"], "b": 0, "w": 2}, "then": self.target(i.operands[0].imm),
                            "else": self.target(i.address + i.size)}
+                    self.note_stops(end, i.operands[0].imm, i.address + i.size)
                 elif m == "jmp":
                     if i.operands[0].type != X.X86_OP_IMM:
                         raise NotImplementedError("indirect jmp")
                     tgt = i.operands[0].imm
                     end = {"return": True} if (tgt in self.stops or self.is_epilogue(tgt)) else {"goto": self.label(tgt)}
+                    if tgt in self.stops:
+                        end["stop"] = h(tgt)
                 elif m in ("ret", "retf"):
                     end = {"return": True, "regs_live": True}
                 elif m == "call" and i.operands[0].type == X.X86_OP_IMM and i.operands[0].imm in self.subs:
@@ -1083,6 +1214,20 @@ class Lifter:
                         regs[REG8[r][0] if r in REG8 else r] = ["unknown", h(i.address)]
         if end is None:
             end = {"return": True} if (fall in self.stops or self.is_epilogue(fall)) else {"goto": self.label(fall)}
+            if fall in self.stops:
+                end["stop"] = h(fall)
+        if start in self.capture_end and F[0] is not None and F[0][0] in ("cmp", "sub"):
+            # a later block reads these flags after a join (see resolve_flag_joins): keep both operands in
+            # fa/fb (fb too when it is a constant: every path into the join must define it)
+            kind_, fa_, fb_, w_ = F[0]
+            if fa_ != ["reg", "fa"]:
+                ops.append({"op": "reg", "r": "fa", "val": fa_})
+            if fb_ != ["reg", "fb"]:
+                ops.append({"op": "reg", "r": "fb", "val": fb_ if fb_ is not None else 0})
+            if "if" in end:
+                c = end["if"]
+                c["a"] = walk_expr(c["a"], lambda x: ["reg", "fa"] if x == fa_ else x) if fa_ is not None else c["a"]
+            F[0] = (kind_, ["reg", "fa"], ["reg", "fb"], w_)
         if "if" in end:
             # the condition was built from pre-block register names: capture it
             # if a register it uses is about to be reassigned
@@ -1140,6 +1285,8 @@ class Lifter:
                 raise NotImplementedError("far call outside cs")
             tgt = i.operands[1].imm
         role = t.routines.get(tgt)
+        if role is None and t.far_ds_display(tgt):
+            role = t.routines[tgt] = f"display:routine_{tgt:04x}"
         materialize()
         if role in ("message", "text", "number_text", "score_refresh") or (role or "").startswith("display:"):
             kind = {"number_text": "number"}.get(role, role if not role.startswith("display:") else "display")
@@ -1188,6 +1335,9 @@ class Lifter:
 
     # -- dead register assignment elimination -----------------------------------
     def dce(self):
+        """Remove register assignments nobody reads.  A gosub/call_hook reads what its callee reads
+        before writing it (callee_reads: liveness with nothing live at the callee's returns), so an
+        assignment made for a subroutine (EP3 cs:264c `mov si,0Fh; call 2D1Ch`) is kept."""
         succ = {}
         for a, b in self.blocks.items():
             e = b["end"]
@@ -1197,27 +1347,46 @@ class Lifter:
                     s.append(int(e[k][1:], 16))
             succ[a] = [x for x in s if x in self.blocks]
         ALL = set(REG16) | {"cf", "fa", "fb"}
-        live_in = {a: set() for a in self.blocks}
-        changed = True
-        while changed:
-            changed = False
-            for a in sorted(self.blocks, reverse=True):
-                b = self.blocks[a]
-                live = set(ALL) if b["end"].get("regs_live") else set()
-                for s in succ[a]:
-                    live |= live_in[s]
-                live |= regs_in(b["end"].get("if", {}), set())
-                for op in reversed(b["ops"]):
-                    if op["op"] in ("reg", "pop"):
-                        live.discard(op["r"])
-                    live |= regs_in({k: v for k, v in op.items() if k not in ("op", "r", "ip")}, set())
-                if live != live_in[a]:
-                    live_in[a] = live
-                    changed = True
+
+        def callee(op):
+            lab = op.get("entry") if op["op"] == "gosub" else None
+            if op["op"] == "call_hook":
+                ent = next((e for e, r in self.t.routines.items() if r == f"hook:{op['hook']}"), None)
+                lab = self.label(ent) if ent is not None else None
+            if lab and lab.startswith("L"):
+                a = int(lab[1:], 16)
+                return a if a in self.blocks else None
+            return None
+
+        def fixpoint(ret_live, reads):
+            live_in = {a: set() for a in self.blocks}
+            changed = True
+            while changed:
+                changed = False
+                for a in sorted(self.blocks, reverse=True):
+                    b = self.blocks[a]
+                    live = set(ret_live) if b["end"].get("regs_live") else set()
+                    for s_ in succ[a]:
+                        live |= live_in[s_]
+                    live |= regs_in(b["end"].get("if", {}), set())
+                    for op in reversed(b["ops"]):
+                        if op["op"] in ("reg", "pop"):
+                            live.discard(op["r"])
+                        live |= regs_in({k: v for k, v in op.items() if k not in ("op", "r", "ip")}, set())
+                        c = callee(op)
+                        if c is not None:
+                            live |= (reads if reads is not None else live_in).get(c, set())
+                    if live != live_in[a]:
+                        live_in[a] = live
+                        changed = True
+            return live_in
+
+        reads = fixpoint(set(), None)          # registers each block reads before writing, returns contribute none
+        live_in = fixpoint(ALL, reads)
         for a, b in self.blocks.items():
             live = set(ALL) if b["end"].get("regs_live") else set()
-            for s in succ[a]:
-                live |= live_in[s]
+            for s_ in succ[a]:
+                live |= live_in[s_]
             live |= regs_in(b["end"].get("if", {}), set())
             keep = []
             for op in reversed(b["ops"]):
@@ -1228,6 +1397,9 @@ class Lifter:
                 if op["op"] == "pop":
                     live.discard(op["r"])
                 live |= regs_in({k: v for k, v in op.items() if k not in ("op", "r", "ip")}, set())
+                c = callee(op)
+                if c is not None:
+                    live |= reads.get(c, set())
                 keep.append(op)
             b["ops"] = keep[::-1]
 
@@ -1281,8 +1453,8 @@ class Semantics:
                 return ["var", self.var_name(a, w), w]
             if x[0] == "add32":
                 return ["add", x[1], x[2]]
-            if x[0] == "cmem" and is_const(x[2]) and t.n == 1 and x[2] in EP1_CS_INPUTS:
-                return ["input", EP1_CS_INPUTS[x[2]]]
+            if x[0] == "cmem" and is_const(x[2]) and x[2] in t.cs_inputs:
+                return ["input", t.cs_inputs[x[2]]]
             return x
         return walk_expr(e, fn)
 
@@ -1622,6 +1794,404 @@ EP1_HOOKS = {
 
 
 # ---------------------------------------------------------------------------
+# main-loop hook discovery (all tables)
+#
+# The main loop (and the end-of-ball routine it calls) is a straight sequence of
+# statements.  A statement boundary is an instruction address that no branch
+# crosses (a jump may land on it) and that does not separate a flag setter from
+# its consumer; each statement is then single-entry / single-exit, so it can be
+# lifted as a hook {entry, stops: [end]}.  A statement is a rule fragment when it
+#   * lies outside the engine's own ball fragments (plunger lane, nudge/tilt,
+#     gravity + object scan; tools/emu/discover.py finds them per table),
+#   * lifts completely: only rule-like near calls (gosub) and the display / sound /
+#     gate routines the lifter already stubs, no port I/O, interrupts, string ops,
+#     far calls into the graphics library or indirect jumps,
+#   * and writes rule state: a DS address that the sensor handlers read or write,
+#     the lamp table, or the score (writes that only touch sound or pitch-sweep
+#     variables do not count: sweeps are exported as `sound_sweeps`).
+# Adjacent rule statements are merged.  The EP1 run reproduces all 6 hand-annotated
+# main-loop fragments of EP1_HOOKS (same entry and stop); see --report.
+
+CALL_ROLES_OK = ("message", "text", "number_text", "score_refresh", "sound_play")
+FLAG_USERS = ("adc", "sbb", "cmc", "rcl", "rcr", "lahf", "pushf", "setc")
+
+
+def _emu_config(n, path):
+    try:
+        sys.path.insert(0, os.path.join(HERE, "emu"))
+        import discover  # noqa: E402
+        return discover.discover(n, path)[0]
+    except Exception as e:  # noqa: BLE001
+        print(f"EP{n}: tools/emu/discover.py failed ({e}); no automatic hooks", file=sys.stderr)
+        return None
+
+
+def _statements(t, a, b, exits=()):
+    """Statement boundaries of cs:a..b.  Jumps to `exits` (the main-loop head: "restart the frame")
+    leave the statement and do not tie it to the code in between."""
+    ins, x = [], a
+    while x < b:
+        i = t.insn(x)
+        if i is None:
+            break
+        ins.append(i)
+        x += i.size
+    br = []
+    for i in ins:
+        if (i.mnemonic in JCC or i.mnemonic in ("jmp", "loop", "jcxz")) and i.operands and i.operands[0].type == X.X86_OP_IMM:
+            if i.operands[0].imm not in exits:
+                br.append((i.address, i.operands[0].imm))
+    cuts = [a]
+    for k in range(1, len(ins)):
+        c = ins[k].address
+        if ins[k].mnemonic in JCC or ins[k].mnemonic in FLAG_USERS:
+            continue
+        if any((s < c < d) if s < d else (d < c <= s) for s, d in br):
+            continue
+        cuts.append(c)
+    cuts.append(x)
+    return [(cuts[k], cuts[k + 1]) for k in range(len(cuts) - 1)]
+
+
+def _insn_ok(t, L, i):
+    """Can the lifter express this instruction inside a hook?  Returns (ok, gosub target or None)."""
+    m = i.mnemonic
+    if m in ("in", "out", "int", "iret", "retf", "ljmp", "hlt") or m.startswith(("rep", "movs", "stos", "lods", "cmps", "scas")) \
+            or "rep" in i.op_str:
+        return False, None
+    if m in ("jmp", "call") and i.operands and i.operands[0].type != X.X86_OP_IMM:
+        return False, None
+    if m == "lcall":
+        tgt = i.operands[1].imm if len(i.operands) == 2 and i.operands[0].imm == t.cs else None
+        role = t.routines.get(tgt) if tgt is not None else None
+        return (role in CALL_ROLES_OK or (role or "").startswith(("gate:", "display:", "hook:"))), None
+    if m == "call":
+        tgt = i.operands[0].imm
+        role = t.routines.get(tgt)
+        if role in CALL_ROLES_OK or (role or "").startswith(("gate:", "display:", "hook:")):
+            return True, None
+        if L.rule_like(tgt):
+            return True, tgt
+        return False, None
+    return True, None
+
+
+def _mem_refs(i):
+    """(writes, reads): DS addresses of direct memory operands; indexed operands give their displacement
+    (tables such as the lamp slots are addressed as [bx+disp])."""
+    w, r = set(), set()
+    for k, op in enumerate(i.operands):
+        if op.type != X.X86_OP_MEM or op.mem.segment not in (0, X.X86_REG_DS):
+            continue
+        d = op.mem.disp & 0xFFFF
+        span = set(range(d, d + max(1, op.size)))
+        if k == 0 and i.mnemonic not in ("cmp", "test", "push") and not i.mnemonic.startswith("j"):
+            w |= span
+            if i.mnemonic not in ("mov",):
+                r |= span
+        else:
+            r |= span
+    return w, r
+
+
+def _code_info(t, L, a, b, seen=None, depth=0):
+    """(ok, writes, reads, uses cs: flags) over cs:a..b, following rule-like near calls."""
+    seen = set() if seen is None else seen
+    W, Rd, keys = set(), set(), False
+    x = a
+    while x < b:
+        i = t.insn(x)
+        if i is None:
+            return False, W, Rd, keys
+        x += i.size
+        if i.mnemonic == "ret" and depth == 0:
+            return False, W, Rd, keys
+        ok, sub = _insn_ok(t, L, i)
+        if not ok:
+            return False, W, Rd, keys
+        if "cs:[" in i.op_str:
+            keys = True
+        w, r = _mem_refs(i)
+        W |= w
+        Rd |= r
+        if sub is not None and sub not in seen:
+            seen.add(sub)
+            ok2, w2, r2, k2 = _code_info(t, L, sub, _routine_end(t, sub), seen, depth + 1)
+            if not ok2:
+                return False, W, Rd, keys
+            W |= w2
+            Rd |= r2
+            keys |= k2
+    return True, W, Rd, keys
+
+
+def _regions(t, L, entry, end):
+    """Maximal liftable regions of the routine cs:entry..end: control flow is followed from each region
+    start and cut at every instruction the lifter cannot express (fades, waits, graphics calls); the
+    instruction after a cut starts the next region.  Returns [(start, stops, blocks_seen)]."""
+    out, todo, done = [], [entry], set()
+    while todo:
+        r = todo.pop(0)
+        if r in done or not (entry <= r < end):
+            continue
+        done.add(r)
+        seen, cuts, work = set(), set(), [r]
+        while work:
+            x = work.pop()
+            while x not in seen and entry <= x < end:
+                i = t.insn(x)
+                if i is None:
+                    break
+                ok, _ = _insn_ok(t, L, i)
+                if not ok:
+                    cuts.add(x)
+                    todo.append(x + i.size)
+                    break
+                seen.add(x)
+                m = i.mnemonic
+                if (m in JCC or m in ("loop", "jcxz")) and i.operands[0].type == X.X86_OP_IMM:
+                    work.append(i.operands[0].imm)
+                if m == "jmp":
+                    x = i.operands[0].imm
+                    continue
+                if m in ("ret", "retf", "iret"):
+                    break
+                x += i.size
+        out.append((r, sorted(cuts), seen, _stack_ok(t, r, seen)))
+    return out
+
+
+def _stack_ok(t, r, seen):
+    """False if some path from r pops more than it pushed (the region uses stack values pushed before
+    the display call that precedes it, so it cannot run on its own)."""
+    work, depth_at = [(r, 0)], {}
+    while work:
+        x, d = work.pop()
+        while x in seen:
+            if depth_at.get(x, 99) <= d:
+                break
+            depth_at[x] = d
+            i = t.insn(x)
+            m = i.mnemonic
+            if m in ("push", "pushf"):
+                d += 1
+            elif m in ("pusha", "pushaw"):
+                d += 1
+            elif m in ("pop", "popf", "popa", "popaw"):
+                d -= 1
+                if d < 0:
+                    return False
+            elif m in ("ret", "retf", "iret"):
+                if d > 0:
+                    pass
+                break
+            if (m in JCC or m in ("loop", "jcxz")) and i.operands[0].type == X.X86_OP_IMM:
+                work.append((i.operands[0].imm, d))
+            if m == "jmp":
+                x = i.operands[0].imm
+                continue
+            x += i.size
+    return True
+
+
+def auto_hooks(t, handler_ips):
+    """Main-loop / end-of-ball rule fragments found by pattern (see the comment above).
+    Returns ({name: hook}, report dict)."""
+    cfg = t.emu_cfg
+    if cfg is None:
+        return {}, {"error": "discover failed"}
+    L0 = Lifter(t)
+    for a in handler_ips + list(t.kicker_routines):
+        L0.discover(a)
+    rule = set()
+    for a, i in L0.body.items():
+        w, r = _mem_refs(i)
+        rule |= w | r
+    lt = t.lamp_table
+    if lt:
+        rule.update(range(lt["phase"], lt["terminator"]))
+    rule.update(range(t.score, t.score + 4))
+    for a_, (role, w) in t.roles.items():
+        if not role.startswith(("sound", "ball.")):
+            rule.update(range(a_, a_ + w))
+    sound = set()
+    for a_, (role, w) in t.roles.items():
+        if role.startswith("sound"):
+            sound.update(range(a_, a_ + w))
+    for sw in t.sweeps:
+        sound.add(int(sw["var"], 16))
+    engine_only = set()
+    for rname in ("ball_x", "ball_y", "ball_vx", "ball_vy", "ball_accx", "ball_accy", "ball_active", "ball_layer"):
+        base = cfg["ds_vars"].get(rname)
+        if base is not None:
+            engine_only.update(range(base, base + 10))
+    ranges = cfg.get("physics_ranges", [])
+    engine_spans, whole = [], []
+    for k, (a, b, s_) in enumerate(ranges):
+        seg = t.code[a:b]
+        if k == len(ranges) - 1:
+            engine_spans.append((a, b))              # gravity + object scan
+        elif cfg["cs_vars"].get("key_nudge_a") is not None and \
+                b"\x2e\x80\x3e" + struct.pack("<H", cfg["cs_vars"]["key_nudge_a"]) in seg:
+            engine_spans.append((a, b))              # nudge / tilt
+        elif cfg.get("ball_lost_fade") is not None and cfg["ball_lost_fade"] in [
+                (x + 3 + struct.unpack_from("<h", t.code, x + 1)[0]) & 0xFFFF for x in s_ if t.code[x] == 0xE8]:
+            engine_spans.append((a, b))              # plunger lane / launch
+        else:
+            whole.append((a, b))                     # counters, drain, extra-gravity decay: rule candidates
+    report = {"statements": 0, "rejected_unliftable": 0}
+
+    # --- main loop: statements
+    stmts = _statements(t, cfg["main_loop"], cfg["frame_sync"], exits=(cfg["main_loop"],))
+    report["statements"] = len(stmts)
+    info = []
+    for a, b in stmts:
+        if any(sa <= a < sb for sa, sb in engine_spans):
+            info.append((a, b, "engine", set(), set(), False, 0))
+            continue
+        ok, W, Rd, keys = _code_info(t, L0, a, b)
+        n_ins = sum(1 for _ in _iter_insns(t, a, b))
+        if not ok:
+            report["rejected_unliftable"] += 1
+        info.append((a, b, "ok" if ok else "bad", W, Rd, keys, n_ins))
+    blf = cfg.get("ball_lost_fade")
+    regions = []
+    if blf is not None:
+        for r0, cuts, seen, stack_ok in _regions(t, L0, blf, _routine_end(t, blf)):
+            if not stack_ok:
+                continue
+            W, Rd = set(), set()
+            for x in seen:
+                w, r = _mem_refs(t.insn(x))
+                W |= w
+                Rd |= r
+                i = t.insn(x)
+                if i.mnemonic == "call":
+                    ok_, sub = _insn_ok(t, L0, i)
+                    if sub is not None:
+                        _, w2, r2, _k = _code_info(t, L0, sub, _routine_end(t, sub), depth=1)
+                        W |= w2
+                        Rd |= r2
+            regions.append((r0, cuts, seen, W, Rd))
+    R = set(rule)
+    sel, rsel = set(), set()
+    for _ in range(6):                               # fixpoint: writers of what rule code reads are rule code
+        for k, (a, b, st, W, Rd, keys, n_ins) in enumerate(info):
+            if st == "ok" and ((W & R) - sound - engine_only):
+                sel.add(k)
+        for k, reg in enumerate(regions):
+            if (reg[3] & R) - sound - engine_only:
+                rsel.add(k)
+        R2 = R.union(*(info[k][4] for k in sel), *(regions[k][4] for k in rsel))
+        if R2 == R:
+            break
+        R = R2
+    hooks = {}
+    # whole counters / drain fragments are one hook when any statement in them is rule code
+    for sa, sb in whole:
+        ks = [k for k, x in enumerate(info) if sa <= x[0] < sb]
+        if any(k in sel for k in ks) and all(info[k][2] == "ok" for k in ks):
+            sel.update(ks)
+            for k in ks:                             # never split inside the fragment
+                info[k] = info[k][:6] + (0,)
+    run = []
+
+    def flush():
+        while run and run[-1] not in sel:
+            run.pop()
+        if run:
+            a0, b0 = info[run[0]][0], info[run[-1]][1]
+            W = set().union(*(info[k][3] for k in run))
+            keys = any(info[k][5] for k in run)
+            kind = _hook_kind(t, cfg, a0, b0, W, keys, "main")
+            name = f"{kind or 'main'}_{a0:04x}"
+            restart = any(i.mnemonic == "jmp" and i.operands[0].type == X.X86_OP_IMM and i.operands[0].imm == cfg["main_loop"]
+                          for i in _iter_insns(t, a0, b0))
+            hooks[name] = {"entry": a0, "stops": (b0,) + ((cfg["main_loop"],) if restart else ()), "conf": "auto",
+                           "kind": kind or "main", "when": "every_frame",
+                           "desc": f"automatic: main-loop statement(s) cs:{a0:04x}..{b0:04x} that write rule state"}
+        run.clear()
+
+    for k, (a, b, st, W, Rd, keys, n_ins) in enumerate(info):
+        neutral = st == "ok" and not W and not keys and k not in sel
+        big = n_ins > 12
+        if k in sel:
+            if run and (big or any(info[j][6] > 12 for j in run if j in sel)):
+                # large statements are hooks of their own; keep the register set-up glue in front
+                glue = []
+                while run and run[-1] not in sel:
+                    glue.insert(0, run.pop())
+                flush()
+                run.extend(glue)
+            run.append(k)
+        elif neutral:
+            run.append(k)                            # register set-up, compares: glue
+        else:
+            flush()
+    flush()
+    # --- end of ball: liftable regions of ball_lost_fade that write rule state
+    kept = {regions[k][0] for k in rsel}
+    for k in sorted(rsel):
+        r0, cuts, seen, W, Rd = regions[k]
+        cont = {}
+        for c_ in cuts:
+            nx = c_ + t.insn(c_).size
+            if nx in kept:
+                cont[h(c_)] = f"ball_end_{nx:04x}"
+        hooks[f"ball_end_{r0:04x}"] = {"entry": r0, "stops": tuple(cuts), "conf": "auto", "kind": "ball_end",
+                                       "when": "ball_end", "continues": cont,
+                                       "desc": f"automatic: end-of-ball code from cs:{r0:04x} (inside ball_lost_fade cs:{blf:04x}) up to "
+                                               "the next display/fade call" + (f"s {', '.join(f'cs:{c:04x}' for c in cuts)}" if cuts else "")}
+    report["candidates"] = sorted((v["entry"], v["stops"], k) for k, v in hooks.items())
+    return hooks, report
+
+
+def _routine_end(t, a, limit=0x800):
+    """End of a near routine: the first ret past every jump target seen so far (linear sweep)."""
+    far, x = a, a
+    while x < a + limit:
+        i = t.insn(x)
+        if i is None:
+            return x
+        if (i.mnemonic in JCC or i.mnemonic in ("jmp", "loop", "jcxz")) and i.operands and i.operands[0].type == X.X86_OP_IMM:
+            far = max(far, i.operands[0].imm)
+        x += i.size
+        if i.mnemonic in ("ret", "retf", "iret") and x > far:
+            return x
+    return x
+
+
+def _iter_insns(t, a, b):
+    x = a
+    while x < b:
+        i = t.insn(x)
+        if i is None:
+            return
+        yield i
+        x += i.size
+
+
+def _hook_kind(t, cfg, a, b, writes, keys, when):
+    ds_ = cfg["ds_vars"]
+    code = t.code[a:b]
+    if when == "ball_end":
+        return "ball_end"
+    xg = ds_.get("extra_gravity_timer")
+    if xg is not None and b"\x83\x3e" + struct.pack("<H", xg) + b"\x00" in code:
+        return "frame_timers"
+    if cfg.get("drain_y") is not None and re.search(rb"\x81\xbd.." + re.escape(struct.pack("<H", cfg["drain_y"])), code, re.S):
+        return "drain"
+    if any(b"\xfe\x0e" + struct.pack("<H", v) in code for v in cfg.get("frame_counters", []) + [ds_.get("event_lockout", -1) & 0xFFFF]):
+        return "frame_counters"
+    if keys and any(struct.pack("<H", cfg["cs_vars"].get(k, 0xFFFF)) in code for k in ("key_lflip", "key_rflip")):
+        return "flipper_press"
+    lt = t.lamp_table
+    if lt and any(lt["first"] <= w < lt["terminator"] for w in writes) and re.search(rb"\x80\x3e..\x00", code, re.S):
+        return "lamp_timer"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # regions and sensors
 
 
@@ -1804,7 +2374,7 @@ def detect_kickouts(blocks, entry):
     return out
 
 
-def build(n):
+def build(n, auto=True, drop=()):
     t = Table(n)
     L = Lifter(t)
     handler_ips = sorted(set(int(v, 16) for v in t.col["trigger_table"]["handlers"].values()))
@@ -1820,6 +2390,11 @@ def build(n):
     else:
         for k in t.kicker_routines:
             hooks["kicker"] = {"entry": k, "stops": (), "desc": "active surface contact routine (from collision.json wall_events)", "conf": "high"}
+        if auto:
+            ah, _rep = auto_hooks(t, handler_ips)
+            for name, hk in sorted(ah.items(), key=lambda kv: kv[1]["entry"]):
+                if name not in drop:
+                    hooks[name] = hk
     if t.dispatch_tail is not None:
         hooks["dispatch_tail"] = {"entry": t.dispatch_tail, "stops": (), "conf": "high",
                                   "desc": "shared exit of the sensor dispatcher: runs after every handler that jumps to it, and on "
@@ -1848,6 +2423,29 @@ def build(n):
                     work.append(fall)
             L.kicker_blocks |= seen
     L.lift_all()
+    # an automatic hook that does not lift completely (an instruction the lifter has no op for) is dropped
+    bad = []
+    for name, hk in hooks.items():
+        if hk.get("conf") != "auto":
+            continue
+        seen, work = set(), [L.label(hk["entry"])]
+        while work:
+            l = work.pop()
+            if l in seen or l[1:].isalpha():
+                continue
+            a_ = int(l[1:], 16) if l.startswith("L") else None
+            if a_ is None or a_ not in L.blocks:
+                continue
+            seen.add(l)
+            b = L.blocks[a_]
+            if any(o["op"] in ("asm", "call") for o in b["ops"]):
+                bad.append(name)
+                break
+            e = b["end"]
+            work += [e[k] for k in ("then", "else", "goto") if k in e]
+            work += [o["entry"] for o in b["ops"] if o["op"] == "gosub"]
+    if bad:
+        return build(n, auto, tuple(drop) + tuple(bad))
 
     S = Semantics(t)
     for b in L.blocks.values():
@@ -1879,6 +2477,10 @@ def build(n):
 
     # sensors (blocks are final here; position branches are evaluated on them)
     sensors = []
+    # the lockout-bypass value of this table's ball_pixel_scan (EP1 cs:16D6 cmp al,0FEh; je +5; cmp ah,0;
+    # EP7 cs:1738 uses 0DBh); tables whose scan has no such test bypass nothing
+    bm = re.search(rb"\x3c(.)\x74\x05\x80\xfc\x00", t.code)
+    bypass = bm.group(1)[0] if bm else None
     for lvl, tbl in enumerate(t.col["sensors"]):
         for v, info in sorted(tbl.items(), key=lambda kv: int(kv[0])):
             v = int(v)
@@ -1895,7 +2497,7 @@ def build(n):
                     elif n == 1 and int(br[1:], 16) in EP1_BRANCHES:
                         r["branch_name"] = EP1_BRANCHES[int(br[1:], 16)]
             sensors.append({"colour": f"{v:02X}", "value": v, "level": lvl, "handler": f"h{hip:04x}",
-                            "fires_when_tilted": info["always"], "ignores_lockout": v == 0xFE,
+                            "fires_when_tilted": info["always"], "ignores_lockout": v == bypass,
                             "regions": regs_})
     handlers = {}
     for a in handler_ips:
@@ -1929,6 +2531,9 @@ def build(n):
         summ, counts = summarize(blocks, entry)
         hook_out[name] = {"entry": entry, "stops": [h(x) for x in hk["stops"]], "desc": hk["desc"], "conf": hk["conf"],
                           "summary": summ, "op_counts": dict(counts)}
+        for k in ("kind", "when", "continues"):          # automatic hooks only (additive keys)
+            if k in hk:
+                hook_out[name][k] = hk[k]
 
     # variables
     pb = t.player_block
@@ -2015,7 +2620,7 @@ def build(n):
                      "low_level": lowlevel, "generic": generic, "unexpressed": unexpressed, "unsupported": dict(L.unsupported),
                      "note": "semantic = engine-facing ops (score, lamp, sound, ball, layer, message, gate, ...); state_updates = "
                              "'set' on named variables; low_level = reg/store/push/pop/gosub"},
-        "notes": t.notes,
+        "notes": t.notes + [f"automatic hook {d} dropped: it does not lift completely" for d in drop],
     }
     return out, t, L
 
@@ -2062,15 +2667,39 @@ def report(out):
         print("   note:", note)
 
 
+def hooks_check(n):
+    t = Table(n)
+    hips = sorted(set(int(v, 16) for v in t.col["trigger_table"]["handlers"].values()))
+    ah, rep_ = auto_hooks(t, hips)
+    print(f"EP{n}: {rep_.get('statements')} main-loop statements, {rep_.get('rejected_unliftable')} not liftable; "
+          f"{len(ah)} automatic hooks")
+    for name, hk in sorted(ah.items(), key=lambda kv: kv[1]["entry"]):
+        print(f"   {name:22s} cs:{hk['entry']:04x} stops {[h(x) for x in hk['stops']]}")
+    if n == 1:
+        auto_ranges = {(hk["entry"], tuple(hk["stops"])) for hk in ah.values()}
+        for name, (entry, stops, desc, conf) in EP1_HOOKS.items():
+            if not stops:
+                continue
+            same = (entry, tuple(stops)) in auto_ranges
+            print(f"   EP1_HOOKS {name:24s} cs:{entry:04x}..{stops[0]:04x}: {'found exactly' if same else 'NOT found as one hook'}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("tables", nargs="+", type=int)
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--dump", default=None, help="print a handler/hook as text")
     ap.add_argument("--no-write", action="store_true")
+    ap.add_argument("--no-auto-hooks", action="store_true",
+                    help="EP2-EP13: only kicker/dispatch_tail hooks (the output before automatic hook discovery)")
+    ap.add_argument("--hooks-check", action="store_true",
+                    help="print the automatic hook discovery and, for EP1, compare it with the hand annotation EP1_HOOKS")
     a = ap.parse_args(argv)
     for n in a.tables:
-        out, t, L = build(n)
+        if a.hooks_check:
+            hooks_check(n)
+            continue
+        out, t, L = build(n, auto=not a.no_auto_hooks)
         if not a.no_write:
             p = os.path.join(ROOT, "extracted", "tables", f"EP{n}", "rules.json")
             with open(p, "w") as f:

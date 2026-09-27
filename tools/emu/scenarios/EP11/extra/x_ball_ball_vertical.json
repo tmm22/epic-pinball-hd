@@ -1,0 +1,25 @@
+{
+ "name": "x_ball_ball_vertical",
+ "table": 11,
+ "frames": 150,
+ "ball": {
+  "x": 151,
+  "y": 255,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 350
+ },
+ "balls": [
+  {
+   "x": 154,
+   "y": 281,
+   "xf": 0,
+   "yf": 0,
+   "vx": 0,
+   "vy": -300
+  }
+ ],
+ "description": "2 balls in open space, ball 0 at (151,255); ball_ball_collide (cs:1da7) first runs at step 2 before any wall contact of ball 0; pairs (di,si) [(0, 2)] in the first 12 frames.",
+ "inputs": []
+}

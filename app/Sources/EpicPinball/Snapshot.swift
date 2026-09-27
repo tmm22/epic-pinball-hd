@@ -11,20 +11,71 @@ func loadFlipperSprites(assets: TableAssets, engine: ClassicEngine) -> FlipperSp
     return set.isEmpty ? nil : set
 }
 
+/// PresentationState from the snapshot/demo flags (no rules interpreter involved).
+@MainActor
+func flagPresentation(_ o: Options, _ p: ClassicPresentation) -> PresentationState {
+    var s = PresentationState()
+    let g = p.composer.graphics
+    s.lamps = (o.lamps ?? .none).states(count: g.lampCount, restIsA: g.lampRestIsA)
+    s.scores = [o.score ?? 0]
+    s.ballNumber = o.ballNumber ?? 1
+    s.currentPlayer = (o.player ?? 1) - 1
+    return s
+}
+
+@MainActor
+func directMessage(_ spec: MessageSpec?, _ p: ClassicPresentation, lines: [MessageLineSpec] = []) -> DotMessage? {
+    guard let m = spec else { return nil }
+    guard let exe = p.exe else { warn("--message needs the original EXE (--original DIR)"); return nil }
+    let text = exe.cString(at: m.exeOffset, max: 64)
+    if text.isEmpty { warn(String(format: "--message: no string at file offset 0x%x", m.exeOffset)) }
+    let extra = lines.map { DotLine(text: exe.cString(at: $0.exeOffset, max: 64), font8: $0.font8, di: $0.di) }
+    return DotMessage(text: text, ax: m.ax ?? 0x101, di: m.di ?? (p.spec.messagesInStrip ? 3 : 12) * 320, appended: extra, colour: m.colour)
+}
+
 /// `--snapshot`: run the classic engine headless, render one frame with Metal, write a PNG.
 enum SnapshotMode {
-    static func run(options o: Options, assets: TableAssets, engine: ClassicEngine) throws {
+    @MainActor
+    static func run(options o: Options, assets: TableAssets, engine: ClassicEngine, dataRoot: URL) throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw RenderError.noDevice }
         let renderer = try PinballRenderer(device: device, assets: assets,
                                            flipperSprites: o.sprites ? loadFlipperSprites(assets: assets, engine: engine) : nil)
         renderer.aspect = o.aspect
+        renderer.filter = o.filter
+        var pres: ClassicPresentation?
+        if !o.legacyWindow, o.sprites, let p = ClassicPresentation.load(assets: assets, engine: engine.data, dataRoot: dataRoot, originalDir: o.originalDir) {
+            p.setStrip(shown: o.stripShown, immediately: true)
+            p.state = flagPresentation(o, p)
+            p.directMessage = directMessage(o.message, p, lines: o.messageLines)
+            p.paused = o.paused
+            p.camera.snap(maxBallY: ClassicPresentation.maxActiveBallY(engine), cameraMax: p.cameraMax)
+            renderer.attach(composer: p.composer)
+            pres = p
+        }
 
-        let sim = GameSimulation(engine: engine, mode: o.mode)
+        let sim = GameSimulation(engine: engine, mode: o.mode, options: o.rulesOptions)
+        pres?.camera.snap(maxBallY: ClassicPresentation.maxActiveBallY(engine), cameraMax: pres?.cameraMax ?? 0x12A)
+        let useRules = engine.rules != nil && !o.hasPresentationFlags
+        func frameDone() {
+            guard let p = pres else { return }
+            if useRules { p.ingest(sim.takePresentation()) }
+            p.stepFrame(engine: engine, manualY: nil)
+        }
         var held: FrameInput = []
         if o.holdLeft { held.insert(.leftFlipper) }
         if o.holdRight { held.insert(.rightFlipper) }
         var ran = 0
-        if let path = o.scenario {
+        if let n = o.autoplay {
+            // A mid-game frame: the auto-player plays n frames (plunge, flip) with the real rules.
+            var player = AutoPlayer(engine: engine)
+            for _ in 0..<n {
+                sim.input = player.input(for: engine).union(held)
+                sim.stepFrame()
+                frameDone()
+                if pres?.state.gameOver == true { break }
+                ran += 1
+            }
+        } else if let path = o.scenario {
             let sc = try Scenario.load(contentsOf: URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
             guard sc.table == assets.table else {
                 throw ScenarioError.invalid("scenario is for table \(sc.table); pass --table \(sc.table)")
@@ -32,9 +83,11 @@ enum SnapshotMode {
             sc.apply(to: engine)
             if let gp = o.gravityPhase { engine.gravityPhase = gp }
             let frames = o.frames ?? sc.frames
+            pres?.camera.snap(maxBallY: ClassicPresentation.maxActiveBallY(engine), cameraMax: pres?.cameraMax ?? 0x12A)
             for f in 0..<frames {
                 sim.input = sc.input(frame: f).union(held)
                 sim.stepFrame()
+                frameDone()
             }
             ran = frames
         } else {
@@ -45,29 +98,45 @@ enum SnapshotMode {
                 while ran < 600 && (engine.plungerCharge == 0 || stable < 3) {
                     sim.input = held.union(.plunger)
                     sim.stepFrame()
+                    frameDone()
                     ran += 1
                     stable = engine.plungerCharge == last ? stable + 1 : 0
                     last = engine.plungerCharge
                 }
             }
+            for _ in 0..<(o.holdPlunger ?? 0) {
+                sim.input = held.union(.plunger)
+                sim.stepFrame()
+                frameDone()
+                ran += 1
+            }
+            if o.holdPlunger != nil { held.insert(.plunger) }
             let frames = o.frames ?? Int((o.simTime * engine.data.timing.frameHz).rounded())
             for _ in 0..<frames {
                 sim.input = held
                 sim.stepFrame()
+                frameDone()
             }
             ran += frames
         }
 
         var camera = Camera()
         camera.showFullTable = o.full
-        if let y = o.cameraY { camera.setY(y) } else { camera.snap(toBallY: sim.renderBallTopLeft.y + 7) }
+        if let p = pres {
+            camera.windowHeight = Double(p.windowRows)
+            camera.setY(o.cameraY ?? Double(p.camera.y))
+        } else if let y = o.cameraY { camera.setY(y) } else { camera.snap(toBallY: sim.renderBallTopLeft.y + 7) }
 
         let scene = SceneState(simulation: sim, camera: camera, showSprites: o.sprites)
+        if let p = pres {
+            if useRules && ran == 0 { p.ingest(sim.takePresentation()) }
+            p.apply(to: renderer, scene: scene, engine: engine)
+        }
         let width: Int, height: Int
         if let size = o.size {
             (width, height) = size
         } else {
-            let rows = Int(scene.viewHeight.rounded())
+            let rows = Int(scene.viewHeight.rounded()) + renderer.visibleStripRows(for: scene)
             let sy = o.aspect == .square ? o.scale : Int((Double(o.scale) * o.aspect.heightOverWidth).rounded())
             width = TableGeometry.width * o.scale
             height = rows * sy
@@ -77,6 +146,13 @@ enum SnapshotMode {
         try PNGWriter.write(rgba: pixels, width: width, height: height, to: url)
         let b = engine.balls[0]
         let flips = engine.groups.map { String($0.angle) }.joined(separator: ",")
+        if let p = pres {
+            let c = p.composer
+            print("presentation: graphics from \(c.graphics.source), window \(p.windowRows) rows + strip \(renderer.visibleStripRows(for: scene)) rows, "
+                  + "lamps drawn \(p.state.lamps.count), message \(p.currentMessage().map { "\($0.text.count) chars ax=0x\(String($0.ax, radix: 16)) di=\($0.di)" } ?? "none")"
+                  + ", filter \(o.filter.rawValue)")
+            if ProcessInfo.processInfo.environment["EPIC_PINBALL_DEBUG_SPEC"] != nil { print("strip spec: \(c.spec)") }
+        }
         print("wrote \(url.path) (\(width)x\(height), table \(assets.table), \(o.full ? "full table" : "window top=\(camera.y)"), "
               + "\(ran) frames; ball x=\(b.x) y=\(b.y) vx=\(b.vx) vy=\(b.vy) active=\(b.active); flipper angles \(flips))")
     }

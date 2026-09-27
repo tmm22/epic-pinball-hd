@@ -1,0 +1,18 @@
+{
+ "name": "bumper_hit_tilted",
+ "table": 2,
+ "frames": 200,
+ "ball": {
+  "x": 135,
+  "y": 74,
+  "xf": 0,
+  "yf": 0,
+  "vx": -212,
+  "vy": 212
+ },
+ "description": "bumper_hit with tilted=1: kicker_hit returns at once (cs:1B53) without setting the cooldown, and the probe that called it is not added to the hit list (cs:1A2E jmp past the append), so the kicker colours CF/D0 are no contact at all while tilted (EP1: a tilted kicker probe is wall).",
+ "pokes": {
+  "tilted": 1
+ },
+ "inputs": []
+}

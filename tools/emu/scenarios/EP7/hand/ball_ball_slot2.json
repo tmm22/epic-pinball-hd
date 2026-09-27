@@ -1,0 +1,34 @@
+{
+ "name": "ball_ball_slot2",
+ "table": 7,
+ "frames": 90,
+ "ball": {
+  "x": 81,
+  "y": 302,
+  "xf": 0,
+  "yf": 0,
+  "vx": 250,
+  "vy": 0
+ },
+ "balls": [
+  {
+   "x": 97,
+   "y": 174,
+   "xf": 0,
+   "yf": 0,
+   "vx": 0,
+   "vy": 0
+  },
+  {
+   "x": 115,
+   "y": 302,
+   "xf": 0,
+   "yf": 0,
+   "vx": -250,
+   "vy": 0
+  }
+ ],
+ "description": "Ball 0 at (81,302) v=(250,0) and a ball in slot 2 at (115,302) v=(-250,0), slot 1 parked at (97,174): ball 0 first differs from the single-ball run at record 5 (frame 1 step 2), before any wall contact of ball 0: ball-ball collision pair 0-2.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

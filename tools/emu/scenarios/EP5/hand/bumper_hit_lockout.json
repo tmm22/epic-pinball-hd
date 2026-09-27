@@ -1,0 +1,18 @@
+{
+ "name": "bumper_hit_lockout",
+ "table": 5,
+ "frames": 200,
+ "ball": {
+  "x": 124,
+  "y": 140,
+  "xf": 0,
+  "yf": 0,
+  "vx": -300,
+  "vy": 0
+ },
+ "description": "bumper_hit with the sensor lockout poked to 3: in EP5 the sensor lockout and the kicker cooldown are one byte (ds:43DE: dec cs:06FE, kicker test cs:141A, kicker sets 4 cs:1533, sensor handlers set 1/3/15 cs:1AC4..1D5F), so the first kicker contact within 3 frames does not kick.",
+ "pokes": {
+  "event_lockout": 3
+ },
+ "inputs": []
+}

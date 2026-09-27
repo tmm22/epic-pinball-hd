@@ -1,0 +1,17 @@
+{
+ "name": "serve_plunger_held",
+ "table": 6,
+ "frames": 160,
+ "ball": {
+  "x": 150,
+  "y": 390,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 300
+ },
+ "on_drain": "continue",
+ "description": "Ball dropped into the drain (y 390, vy 300), on_drain=continue, plunger held frames 0..39: the drain code serves at (297,346) with vx=2 (cs:09F8..0A15) and, while the plunger is held, the lane code never zeroes vx (cs:0B6E path): 16 records with vx=2 before the release at frame 40.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": [4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+}

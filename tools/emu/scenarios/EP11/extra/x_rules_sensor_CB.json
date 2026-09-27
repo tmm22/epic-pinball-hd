@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_CB",
+ "table": 11,
+ "frames": 200,
+ "ball": {
+  "x": 249,
+  "y": 88,
+  "xf": 0,
+  "yf": 0,
+  "vx": 57,
+  "vy": -138,
+  "layer": 0
+ },
+ "mode": "rules",
+ "description": "rules mode, level 0: ball (249,88) v=(57,-138) into the CB sensor pixels around (260,86); the original dispatches CB (handler cs:1fb5) first at frame 0; colours seen in 40 frames: CB.",
+ "inputs": []
+}

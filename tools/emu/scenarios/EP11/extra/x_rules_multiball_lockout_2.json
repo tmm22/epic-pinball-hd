@@ -1,0 +1,27 @@
+{
+ "name": "x_rules_multiball_lockout_2",
+ "table": 11,
+ "frames": 120,
+ "ball": {
+  "x": 186,
+  "y": 86,
+  "xf": 0,
+  "yf": 0,
+  "vx": 143,
+  "vy": -93
+ },
+ "balls": [
+  {
+   "x": 206,
+   "y": 107,
+   "xf": 0,
+   "yf": 0,
+   "vx": 300,
+   "vy": 0,
+   "layer": 0
+  }
+ ],
+ "mode": "rules",
+ "description": "rules mode, 2 balls: ball 0 from x_rules_saucer_c4, slot 1 from x_rules_sensor_C9. EP9-13 keep one sensor lockout per ball (ds:374b+2i, copied into ds:3756 around each ball's pixel scan and decremented per frame per slot); a lockout set by one ball's handler must not block the other ball's sensors. The port with a single lockout diverges at record 58 (collided).",
+ "inputs": []
+}

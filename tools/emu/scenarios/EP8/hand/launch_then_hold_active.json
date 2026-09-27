@@ -1,0 +1,17 @@
+{
+ "name": "launch_then_hold_active",
+ "table": 8,
+ "frames": 200,
+ "ball": {
+  "x": 148,
+  "y": 396,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0,
+  "active": 0
+ },
+ "description": "As plunger_launch (slot 0 inactive, plunger held 10 frames, launched at release), then the plunger is held again at frames 70..79 while the ball is active: the launch block is skipped (cs:0B69..0B7C), so nothing happens to the ball.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": [4,4,4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,4,4,4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+}

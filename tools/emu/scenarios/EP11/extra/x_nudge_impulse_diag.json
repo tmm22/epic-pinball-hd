@@ -1,0 +1,18 @@
+{
+ "name": "x_nudge_impulse_diag",
+ "table": 11,
+ "frames": 120,
+ "ball": {
+  "x": 65,
+  "y": 45,
+  "xf": 0,
+  "yf": 0,
+  "vx": 250,
+  "vy": -250
+ },
+ "pokes": {
+  "nudge_timer": 13
+ },
+ "description": "diagonal_wall_hit start with nudge_timer poked to 13: the nudge impulse branch (cs:1d7e) runs 13 times, first at step 5 (no nudge key held, so vx +20 +20 -40).",
+ "inputs": []
+}

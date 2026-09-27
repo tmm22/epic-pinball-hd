@@ -33,12 +33,16 @@ public final class GameSimulation {
 
     public var frameDuration: Double { 1.0 / engine.data.timing.frameHz }
 
-    public init(engine: ClassicEngine, mode: SimulationMode = .classic) {
+    public init(engine: ClassicEngine, mode: SimulationMode = .classic, options: RulesOptions = RulesOptions()) {
         self.engine = engine
         self.mode = mode
-        engine.resetToRest()
-        for i in engine.balls.indices { engine.balls[i].active = 0 }
-        engine.serveBall()
+        if engine.rules != nil {
+            engine.startGame(options: options)   // table rules in full mode (ClassicEngine+Rules.swift)
+        } else {
+            engine.resetToRest()
+            for i in engine.balls.indices { engine.balls[i].active = 0 }
+            engine.serveBall()
+        }
         let p = Self.subpixel(engine.balls[0])
         previousBall = p
         currentBall = p
@@ -63,12 +67,24 @@ public final class GameSimulation {
         return n
     }
 
+    /// Per-frame input source (e.g. `AutoPlayer`); when set it replaces `input` for every frame.
+    public var inputProvider: ((ClassicEngine) -> FrameInput)?
+
     /// Runs exactly one original frame with the current input.
     public func stepFrame() {
         previousBall = Self.subpixel(engine.balls[0])
-        engine.input = input
+        engine.input = inputProvider.map { $0(engine) } ?? input
         engine.runFrame()
         currentBall = Self.subpixel(engine.balls[0])
+    }
+
+    /// A new game with the attached rules (full mode), as at start-up.
+    public func newGame(options: RulesOptions = RulesOptions()) {
+        engine.startGame(options: options)
+        _ = engine.takePresentation()   // drop the previous game's queued events
+        accumulator = 0
+        previousBall = Self.subpixel(engine.balls[0])
+        currentBall = previousBall
     }
 
     /// New ball at the plunger (the original does this itself after a drain).
@@ -80,6 +96,10 @@ public final class GameSimulation {
         previousBall = Self.subpixel(engine.balls[0])
         currentBall = previousBall
     }
+
+    /// Everything to present since the previous call (sound events of all frames run in between
+    /// are kept, in order). See `RulesRuntime` for the field mapping.
+    public func takePresentation() -> PresentationState { engine.takePresentation() }
 
     /// Top-left of ball 0's 15x14 box for drawing (integer in classic mode).
     public var renderBallTopLeft: Vec2 {

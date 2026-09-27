@@ -1,0 +1,20 @@
+{
+ "name": "db_bypasses_lockout",
+ "table": 7,
+ "frames": 60,
+ "ball": {
+  "x": 152,
+  "y": 10,
+  "xf": 0,
+  "yf": 0,
+  "vx": -200,
+  "vy": 0
+ },
+ "mode": "rules",
+ "pokes": {
+  "event_lockout": 20
+ },
+ "description": "As db_lane_reverse with event_lockout (ds:5532)=20 poked: EP7's ball scan lets 0xDB through while the lockout is set (cs:1738 cmp al,0DBh; je 1741), so the reversal still happens (first vx>0 at frame 2). engine.json sensors.always_fires = 219; EP1's 0xFE is not special here.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Differential test: the ORIGINAL EP1 code (Unicorn harness) vs the Swift port, per scenario.
+"""Differential test: the ORIGINAL table code (Unicorn harness) vs the Swift port, per scenario.
 
 Every scenario is run through
-  * tools/emu/run_scenario.py (the original EP1.EXE machine code; ground truth), in-process, and
-  * the Swift port: `EpicPinball --trace SCENARIO --out TRACE` (app/.build/debug/EpicPinball),
+  * tools/emu/run_scenario.py (the original EPn.EXE machine code; ground truth), in-process, and
+  * the Swift port: `EpicPinball --trace SCENARIO --out TRACE --table N` (app/.build/debug/EpicPinball),
 and the two JSONL traces are compared record by record (one record per physics step). For each
 scenario the first divergent record is reported with its frame, step and every field that
 differs (original value, port value), plus a few records of context.
 
 Usage (from the project root):
   .venv/bin/python tools/emu/diff_traces.py                       # tools/emu/scenarios/ + scenarios_pathological/
+  .venv/bin/python tools/emu/diff_traces.py --table 4             # EP4: tools/emu/scenarios/EP4/ (make_scenarios.py --table 4)
   .venv/bin/python tools/emu/diff_traces.py tools/emu/scenarios/bumper_hit.json [more ...]
   .venv/bin/python tools/emu/diff_traces.py --mode rules          # override every scenario's mode
   .venv/bin/python tools/emu/diff_traces.py --modes physics,rules # run each scenario in several modes
@@ -19,8 +20,9 @@ Usage (from the project root):
                                                                   # a hang/fault adds a last {"orig_error":..} line)
   .venv/bin/python tools/emu/diff_traces.py --a X.jsonl --b Y.jsonl   # just diff two existing traces
 
-Options: --contract-only (ignore the optional `extra` diagnostics), --context N, --json FILE
-(machine-readable summary), --out-dir DIR (traces, default scratch/diff/traces), --bin PATH.
+Options: --table N (default 1; also overrides the scenarios' own "table"), --contract-only (ignore the
+optional `extra` diagnostics), --context N, --json FILE (machine-readable summary), --out-dir DIR (traces,
+default scratch/diff/traces, scratch/diff/traces/EPn for n >= 2), --bin PATH.
 
 Outcomes per scenario:
   EXACT          every record identical (all contract fields and, unless --contract-only, `extra`)
@@ -32,7 +34,8 @@ Outcomes per scenario:
   ORIG_FAULT     the original raises a divide error (#DE) in some step.  Passes only if earlier records are
                  identical AND the port's record for that step shows extra.divide_faults.
   RULES_GAP      (rules/full mode only) diverges, and the original dispatched a rule handler the port does
-                 not run (not in engine.json sensors, and not a `jmp exit` no-op) within 64 frames before the
+                 not run (not in engine.json sensors nor rules.json handlers, and not a `jmp exit` no-op) within
+                 64 frames before the
                  divergence; the latest such handler is named, plus the original's event_lockout/cooldown at
                  that frame (a lockout set by a rule blocks later sensors).  This is a heuristic attribution:
                  it still counts as a failure, and a real port bug inside that window would be mislabelled,
@@ -110,8 +113,9 @@ def write_jsonl(path, recs):
             f.write(json.dumps(r, separators=(',', ':')) + '\n')
 
 
-def run_port(binary, scn_path, out_path):
-    r = subprocess.run([binary, '--trace', scn_path, '--out', out_path], capture_output=True, text=True)
+def run_port(binary, scn_path, out_path, table=1):
+    r = subprocess.run([binary, '--trace', scn_path, '--out', out_path, '--table', str(table)],
+                       capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f'port failed ({r.returncode}): {r.stderr.strip()[-400:]}')
     return read_jsonl(out_path)
@@ -179,16 +183,25 @@ def load_ported_sensors(table=1):
     except (OSError, KeyError, ValueError):
         return set(), {}, None
     ported = {(lv, int(c)) for lv, level in enumerate(sens.get('levels', [])) for c in level}
+    # With rules.json the port runs every lifted handler (app/Sources/PinballCore/Rules): only colours
+    # without a lifted handler remain candidates for a rules gap.
+    try:
+        rj = json.load(open(os.path.join(ROOT, 'extracted', 'tables', f'EP{table}', 'rules.json')))
+        for h in rj.get('handlers', {}).values():
+            for c in h.get('colours', []):
+                ported.update({(0, int(c, 16)), (1, int(c, 16))})
+    except (OSError, ValueError):
+        pass
     skipped = {tuple(int(x) for x in k.split(':')): v for k, v in sens.get('skipped', {}).items()}
     exit_ip = int(sens['exit_ip'], 16) if isinstance(sens.get('exit_ip'), str) else sens.get('exit_ip')
     return ported, skipped, exit_ip
 
 
-def explain_rules(res, a, sensor_log, emu, frame_state=None, window=64):
+def explain_rules(res, a, sensor_log, emu, frame_state=None, window=64, table=1):
     """For a rules/full-mode divergence: the last rule handler the ORIGINAL dispatched (within `window`
     frames before the divergent record) that the port does not run.  Handlers whose code is a single
     `jmp exit` are no-ops and are ignored."""
-    ported, skipped, exit_ip = load_ported_sensors()
+    ported, skipped, exit_ip = load_ported_sensors(table)
     frame = a[res['first_diff']]['frame'] if res['first_diff'] < len(a) else None
     if frame is None:
         return None
@@ -222,15 +235,18 @@ def explain_rules(res, a, sensor_log, emu, frame_state=None, window=64):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument('scenarios', nargs='*', help='scenario files or directories (default tools/emu/scenarios)')
+    ap.add_argument('scenarios', nargs='*', help='scenario files or directories (default tools/emu/scenarios '
+                    '+ scenarios_pathological for table 1, tools/emu/scenarios/EPn for table n)')
+    ap.add_argument('--table', type=int, default=None, choices=range(1, 14), metavar='N',
+                    help='table 1..13 (default 1); overrides each scenario\'s "table"')
     ap.add_argument('--mode', choices=['physics', 'rules', 'full'], help='override the scenarios\' mode')
     ap.add_argument('--modes', help='comma list of modes; each scenario is run once per mode')
     ap.add_argument('--bin', default=DEFAULT_BIN, help='Swift EpicPinball binary')
     ap.add_argument('--build', action='store_true', help='run `swift build` in app/ first')
-    ap.add_argument('--out-dir', default=os.path.join(ROOT, 'scratch', 'diff', 'traces'))
+    ap.add_argument('--out-dir', default=None, help='default scratch/diff/traces (EPn/ below it for n >= 2)')
     ap.add_argument('--save-golden', action='store_true',
                     help='write the original\'s traces to scratch/diff/golden/<name>.jsonl (scenario mode only)')
-    ap.add_argument('--golden-dir', default=os.path.join(ROOT, 'scratch', 'diff', 'golden'))
+    ap.add_argument('--golden-dir', default=None, help='default scratch/diff/golden (EPn/ below it for n >= 2)')
     ap.add_argument('--contract-only', action='store_true', help='ignore the extra diagnostics')
     ap.add_argument('--context', type=int, default=3)
     ap.add_argument('--json', help='write a JSON summary here')
@@ -252,8 +268,20 @@ def main():
     import ep_emu
     import run_scenario
 
+    table = args.table or 1
+    sub = [] if table == 1 else [f'EP{table}']
+    if args.out_dir is None:
+        args.out_dir = os.path.join(ROOT, 'scratch', 'diff', 'traces', *sub)
+    if args.golden_dir is None:
+        args.golden_dir = os.path.join(ROOT, 'scratch', 'diff', 'golden', *sub)
+    default_dirs = ([os.path.join(HERE, 'scenarios'), os.path.join(HERE, 'scenarios_pathological')] if table == 1
+                    else [os.path.join(HERE, 'scenarios', f'EP{table}')])
+    if table != 1:
+        # hand-made / directed sets live in subdirectories (make_scenarios.py --table N rewrites EPn/*.json)
+        default_dirs += [d for d in (os.path.join(HERE, 'scenarios', f'EP{table}', sub) for sub in ('hand', 'extra'))
+                         if os.path.isdir(d)]
     paths = []
-    for p in args.scenarios or [os.path.join(HERE, 'scenarios'), os.path.join(HERE, 'scenarios_pathological')]:
+    for p in args.scenarios or default_dirs:
         paths += sorted(glob.glob(os.path.join(p, '*.json'))) if os.path.isdir(p) else [p]
     modes = args.modes.split(',') if args.modes else [args.mode]
 
@@ -261,6 +289,8 @@ def main():
     t0 = time.time()
     for path in paths:
         scn = json.load(open(path))
+        if args.table is not None and scn.get('table', 1) != args.table:
+            scn = dict(scn, table=args.table)
         base = os.path.splitext(os.path.basename(path))[0]
         for mode in modes:
             s = dict(scn)
@@ -270,7 +300,7 @@ def main():
                 name = f'{base}.{mode}'
             eff_mode = s.get('mode', 'physics')
             scn_path = path
-            if s != scn:
+            if s != json.load(open(path)):
                 scn_path = os.path.join(args.out_dir, f'{name}.scenario.json')
                 os.makedirs(args.out_dir, exist_ok=True)
                 json.dump(s, open(scn_path, 'w'))
@@ -294,15 +324,16 @@ def main():
                                                            frame=orig_error[1], step=orig_error[2])]
                 write_jsonl(os.path.join(args.golden_dir, f'{base}.jsonl'), a + tail)
             try:
-                b = run_port(args.bin, scn_path, os.path.join(args.out_dir, f'{name}.port.jsonl'))
+                b = run_port(args.bin, scn_path, os.path.join(args.out_dir, f'{name}.port.jsonl'), s.get('table', 1))
             except RuntimeError as e:
                 results.append(dict(name=name, mode=eff_mode, status='PORT_ERROR', ok=False, error=str(e)))
                 print(f'{name:40s} PORT_ERROR: {e}')
                 continue
             res, lines = diff_one(a, b, use_extra, args.context, orig_error)
-            res.update(name=name, mode=eff_mode)
+            res.update(name=name, mode=eff_mode, table=s.get('table', 1))
             if res['status'] == 'DIVERGES' and eff_mode != 'physics':
-                why = explain_rules(res, a, sensor_log, run_scenario._BASE[s.get('table', 1)][0], frame_state)
+                why = explain_rules(res, a, sensor_log, run_scenario._BASE[s.get('table', 1)][0], frame_state,
+                                    table=s.get('table', 1))
                 if why:
                     res.update(status='RULES_GAP', explanation=why)
                     lines[0] = lines[0].replace('DIVERGES', 'RULES_GAP', 1)

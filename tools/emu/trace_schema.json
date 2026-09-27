@@ -19,7 +19,8 @@
         "yf": {"type": "integer", "description": "ball_accy ds:6A24: as xf"},
         "vx": {"type": "integer", "description": "ball_vx ds:6A00: velocity in 1/128 px per physics step"},
         "vy": {"type": "integer", "description": "ball_vy ds:6A0C: velocity in 1/128 px per physics step, positive = down"},
-        "layer": {"type": "integer", "enum": [0, 1], "description": "Scenario only (optional, default 0): ball_layer ds:6772, 1 = upper level (ramps), colours BC..C7 collide, reflection divisors + p_up_*"}
+        "layer": {"type": "integer", "enum": [0, 1], "description": "Scenario only (optional, default 0): ball_layer ds:6772, 1 = upper level (ramps), colours BC..C7 collide, reflection divisors + p_up_*"},
+        "active": {"type": "integer", "description": "Scenario only (optional, default 1): ball_active. 0 = slot 0 starts inactive (EP8: its launch code only runs while no ball is active)"}
       }
     },
     "params": {
@@ -50,7 +51,7 @@
       "properties": {
         "name": {"type": "string"},
         "description": {"type": "string"},
-        "table": {"type": "integer", "const": 1, "description": "Only EP1 is mapped in the harness"},
+        "table": {"type": "integer", "minimum": 1, "maximum": 13, "description": "Table 1..13. The harness takes each table's addresses from tools/emu/tables/EPn.json (tools/emu/discover.py). EP1 cs:/ds: addresses quoted in this schema differ per table"},
         "frames": {"type": "integer", "minimum": 1},
         "ball": {"$ref": "#/$defs/ball"},
         "inputs": {
@@ -64,7 +65,11 @@
         "mode": {"type": "string", "enum": ["physics", "rules", "full"], "default": "physics",
                  "description": "Harness only. physics: main-loop physics pieces only (no sensor/rule dispatch). rules: also ball_pixel_scan (cs:1679 -> rule handlers). full: the whole real main loop body cs:04D2..1243."},
         "pokes": {"type": "object", "additionalProperties": {"type": "integer"},
-                  "description": "Harness only: raw writes to named DS variables of tools/emu/ep_emu.py before frame 0 (e.g. kicker_cooldown)."}
+                  "description": "Harness only: raw writes to named DS variables of tools/emu/ep_emu.py before frame 0 (e.g. kicker_cooldown)."},
+        "balls": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/ball"},
+                  "description": "Optional: balls for slots 1..4 in order (slot 0 = ball). Read by the harness and the Swift port."},
+        "extra_balls": {"type": "array", "items": {"type": "object", "required": ["slot", "x", "y"]},
+                        "description": "Harness only: balls for explicit slot numbers, e.g. {\"slot\": 2, \"x\": .., \"y\": ..}."}
       }
     },
     "record": {

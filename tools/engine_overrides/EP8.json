@@ -1,0 +1,273 @@
+{
+  "format": "epic-pinball-engine-overrides/1",
+  "table": 8,
+  "exe": "EP8.EXE",
+  "note": "Additive patch for extracted/tables/EP8/engine.json: deep-merge 'patch' into the exporter's output (new keys only; nothing here renames or removes a key). export_engine_data.py does not read this directory yet. Only code addresses (cs:/ds: offsets in EP8's own segments), small engine constants and flags; nothing is copied from the game (pixel lists are referenced by their DS offset and read from the user's EXE). Every value is cited in 'evidence' and was run on the original code with the harness (scenarios in tools/emu/scenarios/EP8/hand/, generator scratch/tables/common/extra_scenarios.py).",
+  "patch": {
+    "plunger": {
+      "launch_block": {
+        "ip": "0x0b62",
+        "skip_if": {
+          "ball_layer0_var": "0x5f44",
+          "ball_layer0_ne": 0,
+          "any_active_slots": [
+            0,
+            1,
+            2
+          ]
+        },
+        "serve_delay": {
+          "var": "0x5aeb",
+          "ball_lost_fade_at": 1,
+          "ops_at_1": [
+            [
+              "0x5ae1",
+              2,
+              0
+            ],
+            [
+              "0x5ae3",
+              2,
+              0
+            ],
+            [
+              "0x5ae9",
+              2,
+              0
+            ]
+          ]
+        },
+        "scroll_keys_first": {
+          "up": "cs:0278",
+          "down": "cs:0279"
+        },
+        "hold_keys": [
+          "ctrl cs:027F",
+          "space cs:027C",
+          "demo ds:7285"
+        ],
+        "flag_var": "0x5aec",
+        "hold_sets_flag_to": 700,
+        "release_if_flag_nonzero": {
+          "flag_to": 0,
+          "slot": 0,
+          "active": 1,
+          "x": 148,
+          "y": 396,
+          "vx": -147,
+          "vy": -600,
+          "keeps": [
+            "accx",
+            "accy",
+            "layer"
+          ]
+        },
+        "release_ds_ops": [
+          [
+            "0x5ade",
+            2,
+            0
+          ],
+          [
+            "0x00c1",
+            2,
+            0
+          ],
+          [
+            "0x009e",
+            2,
+            6
+          ],
+          [
+            "0x037f",
+            1,
+            150
+          ]
+        ],
+        "release_message": {
+          "bx": "0x0583",
+          "ax": 1,
+          "di": "0x1400",
+          "call": "cs:0C30 call 15C5 (dmd_message)"
+        }
+      },
+      "lane_present": false
+    },
+    "drain": {
+      "slots": 3,
+      "slot_order": [
+        2,
+        1,
+        0
+      ],
+      "serve_when_empty": null,
+      "on_drain": {
+        "if_var": "0x055e",
+        "eq": 1,
+        "then": {
+          "set": {
+            "0x055e": 0,
+            "0x04a7": 235,
+            "0x04a6": 224,
+            "0x04a9": 223
+          }
+        },
+        "else": {
+          "set": {
+            "0x5aeb": 7
+          }
+        }
+      },
+      "on_drain_ops": [
+        {
+          "if": [
+            "0x055e",
+            1,
+            1
+          ],
+          "then": [
+            [
+              "0x055e",
+              1,
+              0
+            ],
+            [
+              "0x04a7",
+              1,
+              235
+            ],
+            [
+              "0x04a6",
+              1,
+              224
+            ],
+            [
+              "0x04a9",
+              1,
+              223
+            ]
+          ],
+          "else": [
+            [
+              "0x5aeb",
+              1,
+              7
+            ],
+            {
+              "if": [
+                "0x0624",
+                1,
+                1
+              ],
+              "then": [
+                [
+                  "0x0624",
+                  1,
+                  0
+                ],
+                [
+                  "0x5ae1",
+                  2,
+                  0
+                ],
+                [
+                  "0x5ae3",
+                  2,
+                  0
+                ],
+                [
+                  "0x5ae9",
+                  2,
+                  0
+                ]
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "nudge": {
+      "allowed_if": "any_active_slots [0, 1, 2]",
+      "lane_test": false
+    },
+    "integration": {
+      "max_x": 304,
+      "max_x_compare": "unsigned, before the signed min_x test (a negative x becomes max_x)"
+    },
+    "wall": {
+      "level0_lo_var": "0x04a7",
+      "level0_lo_initial": 235
+    },
+    "occlusion": {
+      "level0_bounds_vars": {
+        "front_max": "0x04a6",
+        "occludes_max": "0x04a9"
+      },
+      "level0_bounds_initial": {
+        "front_max": 224,
+        "occludes_max": 223
+      },
+      "level0_sensor_max": 240
+    },
+    "kicker": {
+      "kick_override": {
+        "var": "0x5d07",
+        "eq": 2,
+        "kick": 2
+      }
+    },
+    "main_loop_ball_effects": [
+      {
+        "id": "magnet",
+        "ip": "0x05d4",
+        "stop": "0x0643",
+        "enable_var": "0x0454",
+        "enable_eq": 1,
+        "ball": 0,
+        "centre_vars": [
+          "0x0456",
+          "0x0458"
+        ],
+        "strength_var": "0x0460",
+        "range": 60,
+        "min_d2": 20,
+        "formula": "dx = cx - x, dy = cy - y (s16); only if -60 < dx < 60 and -60 < dy < 60 and dx*dx+dy*dy != 0 (16-bit imul products); d2 = max(dx*dx+dy*dy, 20) (unsigned compare); vx -= (dx*s) idiv d2; vy -= (dy*s) idiv d2 (32-bit dividend, 16-bit quotient)"
+      },
+      {
+        "id": "magnet2_dead",
+        "ip": "0x0643",
+        "stop": "0x06b2",
+        "enable_var": "0x0455",
+        "note": "same with += and centre ([045A],[045C]); [0455] is 0 at boot and never written"
+      },
+      {
+        "id": "transport",
+        "ip": "0x06b2",
+        "stop": "0x0843",
+        "note": "rule-driven state machine ([04A4] timer set by sensor handler h28c4, [04A3] mode, [04AA] target) that places ball 0, sets its velocity, the lockout [5F3E] and the wall/scan thresholds [04A7]/[04A6]/[04A9]; lifted as rules.json hook main_06b2"
+      },
+      {
+        "id": "toy_shapes",
+        "ip": "0x1095",
+        "stop": "0x10a9",
+        "draw_ip": "0x429e",
+        "note": "per lamp slot i = 1.. until [5CC3+i] == 0xFF: al = 2 - [5CC3+i]; cs:429E: rec = ds:0780 + 8*(i-1); if (al & 1) != [rec+8]: [rec+8] = al & 1; draw shape [0962 + 2*min([rec+6],5)] (u16 count, offsets) at segment of row [rec+4] (+[rec+2]) in colour [rec+9] (0 if the bit is 0) into the collision buffer"
+      }
+    ]
+  },
+  "evidence": {
+    "plunger.launch_block": "cs:0B62 cmp byte [5F44],0; jne exit; cs:0B69..0B7C active[0..2]==1 -> exit; cs:0B7E serve_delay [5AEB]: dec, ==1 -> cs:0B97..0BA9 (ball_lost_fade), exit; cs:0BAF/0BD2 up/down keys scroll [5ADE] and exit; cs:0BF3..0C08 [7285] or cs:[027F] or cs:[027C] -> cs:0C0A mov word [5AEC],2BCh; cs:0C13 [5AEC]==0 -> exit; cs:0C1A..0C65 [5ADE]=0, [00C1]=0, message, [009E]=6, [5AEC]=0, vx0=FF6Dh, vy0=FDA8h, display calls (58C2 VRAM clear, 3904 panel text), active0=1, x0=94h, y0=18Ch, [037F]=96h. Harness: plunger_launch, long_600_scripted, hand/launch_then_hold_active (all diverge at record 0: the port ignores ball.active=0 and has no launch block).",
+    "plunger.lane_present": "no lane guard exists; the EP1-fallback lane (x>=280, y>=220) makes the port zero vx and charge the plunger there: hand/no_lane_region (original vx 60 kept, port 0 at record 0) and hand/no_lane_region_plunger (port charge 12).",
+    "drain": "cs:0A2D mov di,6 .. cs:0A94 (slots 2,1,0 only; physics_step runs 5 slots); per drained slot cs:0A49 active=0, then [055E]==1 ? reset [055E]/[04A7]/[04A6]/[04A9] : [5AEB]=7 (+ rule vars when [0624]==1); cs:0A96 cmp cx,3; jne +0 (no serve). Harness: hand/drain_no_serve (original slot 0 stays inactive; the port re-serves at the EP1 fallback (284,336) at frame 3).",
+    "nudge": "cs:0E23..0E7D: (cs:[027D] | cs:[027E] | cs:[027C]) && [5ACD] != 1 && (active0|active1|active2) && [5ACB] == 0 -> [5ACC] += 23h, [5ACB] = 0Ah, camera [6CF2] -= 10 (min 10); no lane test (engine.json nudge.lane_* are EP1 fallbacks). Not run by any scenario: the harness has no nudge inputs.",
+    "integration.max_x": "cs:17A8 cmp word [di+6D00],130h; jbe 17B6; mov word [di+6D00],130h; cs:17B6 cmp word [di+6D00],1; jge; mov ...,1. Harness: hand/right_edge_clamp (original x 304, port 305 at record 2) and hand/left_edge_wrap (x 2 -> 304 in the original, 1 in the port, record 1).",
+    "wall.level0_lo_var": "wall test cs:185D mov al,[04A7] (already in tools/emu/tables/EP8.json wall_test.lo_var); writers: cs:0A5B/0739/07A9/0810/3280 (EB), cs:06E8/0712/20D7/2169/2BF8 (FF). With FF only the flipper value FF collides at level 0. The port's wall LUT is static (EB).",
+    "occlusion.level0_bounds_vars": "ball scan cs:16AF mov bl,[04A6]; cs:16B3 mov bh,[04A9] (level 1: AFh/BBh at cs:16BE): v <= bl -> ball in front; bl < v <= bh -> the pixel occludes the ball; v > bh and v <= F0h (cs:16D6) -> sensor. Boot/EB state: bl=E0h, bh=DFh (nothing occludes, E1..F0 are sensors). The FF state written with [04A7]=FF: bl=01h, bh=FFh, so every pixel above 01 occludes the ball and no sensor can fire (the ball travels 'under' the playfield). The port's occlusion LUT is static.",
+    "kicker.kick_override": "kicker_hit cs:19C0 tilt -> ret; cs:19CA kick = params.kicker ([5F57]); cs:19D0 cooldown [5F3C]=2; cs:19D8 cmp word [5D07],2; jne 1B04; cs:19E5 kick [5F3F]=2 (drop-target mode; [5D07] is 1 at boot and set to 2 by a rule handler at cs:2323). Rule-state gated, so physics mode never sees it.",
+    "main_loop_ball_effects": "cs:05D4..0843 and cs:1095..10A9 disassembled in scratch/tables/EP8/mainloop_0459_09e8.asm; cs:429E at 0x429E..0x4316. Added to EP8's harness rules mode (tools/emu/tables/EP8.json override): multi_bounce_upper rules-vs-full mode on the original was different from frame 45 (teleport) before and is identical after. [0454] is set to 1 by kicker_hit cs:1AE4 (third completed target bank, only when [5D07]==2) and by the sensor handler at cs:2659, to 2 (magnet off) at cs:2D13, to 0 at cs:2AE9 and in ball_lost_fade cs:3276.",
+    "drain.on_drain_ops": "cs:0A4F..0A8A per drained slot: if byte [055E]==1: [055E]=0, [04A7]=EBh, [04A6]=E0h, [04A9]=DFh; else [5AEB]=7 and, if byte [0624]==1: [0624]=0, words [5AE1]=[5AE3]=[5AE9]=0 (disassembly checked by the integrator)",
+    "plunger.launch_block.release_ds_ops": "cs:0C1A..0C65: word [5ADE]=0, word [00C1]=0, dmd_message(bx=583h, ax=1, di=1400h) cs:0C30, word [009E]=6, [5AEC]=0, vx0=FF6Dh, vy0=FDA8h, far 353A:58C2 + cs:3904 (display), active0=1, x0=94h, y0=18Ch, byte [037F]=96h. serve delay reaching 1 (cs:0B97..0BA3) clears words [5AE1]/[5AE3]/[5AE9] before ball_lost_fade.",
+    "occlusion.level0_bounds_initial": "boot/EB state of [04A6]=E0h and [04A9]=DFh (drain cs:0A60/0A65 restore them); cs:16D6 cmp al,0F0h: sensor only up to F0h.",
+    "wall.level0_dynamic": "cs:185D mov al,[04A7]; cs:1876 cmp es:[bx],al; jb skip: indices below [04A7] are empty at level 0, the rest keep their class (EB..EF active, F0..FE wall, FF flipper)."
+  }
+}

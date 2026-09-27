@@ -29,6 +29,11 @@ Usage as a library:
     emu.main_loop_physics()       # main-loop physics pieces (plunger, gravity, ...)
     for _ in range(3): emu.physics_step()
   tools/emu/run_scenario.py wraps exactly this.
+
+Other tables: EpEmu(table=n).  Every address comes from tools/emu/tables/EPn.json, which
+tools/emu/discover.py writes from byte signatures in the user's EPn.EXE ("auto") plus a
+hand-maintained "overrides" block.  The EP1 dict below is the hand-verified reference that
+the EP1 config reproduces (`discover.py --check`), so EP1 runs are unchanged.
 """
 import os
 import struct
@@ -45,13 +50,17 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..'))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 import epexe  # noqa: E402
+sys.path.insert(0, HERE)
+import discover  # noqa: E402
 
 LOAD_SEG = 0x1000          # where the load image goes (PSP at LOAD_SEG-0x10)
 MEM_SIZE = 0x110000        # 1 MB + HMA
 SENTINEL_IP = 0xFFF0       # near return address used to call routines in CS
 
 # ---------------------------------------------------------------------------
-# EP1 addresses (unrelocated offsets; cs = code seg 0x3223, ds = data seg 0x0015)
+# EP1 addresses (unrelocated offsets; cs = code seg 0x3223, ds = data seg 0x0015).
+# Reference only: the harness reads tools/emu/tables/EP1.json, which must reproduce these
+# values (checked by `discover.py --check`).
 # ---------------------------------------------------------------------------
 EP1 = dict(
     exe='EP1.EXE',
@@ -118,10 +127,10 @@ class PushoutLivelock(EmuError):
 
 class EpEmu:
     def __init__(self, table=1, exe_path=None, log_io=False, boot=True, angle_digit='1', players='1'):
-        if table != 1:
-            raise NotImplementedError('only EP1 addresses are mapped (see EP1 dict)')
-        self.A = EP1
-        self.exe_path = exe_path or os.path.join(ROOT, 'original', self.A['exe'])
+        self.table = table
+        self.exe_path = exe_path or os.path.join(ROOT, 'original', f'EP{table}.EXE')
+        self.A = discover.load_config(table, self.exe_path)
+        self.slots = self.A.get('ball_slots', 5)
         self.log_io = log_io
         self.log = []
         self.vectors = {}
@@ -130,6 +139,7 @@ class EpEmu:
         self.cs = LOAD_SEG + self.A['cs']
         self.ds = LOAD_SEG + self.A['ds']
         self.response_log = []      # per physics step: first-response info
+        self.capture_probes = False  # also record the buffer values under the hit probes (scenario search)
         self.uc = Uc(UC_ARCH_X86, UC_MODE_16)
         self.uc.mem_map(0, MEM_SIZE)
         self._load(angle_digit, players)
@@ -161,6 +171,11 @@ class EpEmu:
 
     def ww(self, seg, off, v):
         self.uc.mem_write(self.lin(seg, off), struct.pack('<H', v & 0xFFFF))
+
+    def has(self, name):
+        """True if this table has the DS variable (EP2-EP8 have no extra gravity timer, EP9-13 no
+        event_cooldown, EP8 no plunger charge ...)."""
+        return name in self.A['ds_vars']
 
     def dsw(self, name, idx=0, signed=True):
         return self.rw(self.ds, self.A['ds_vars'][name] + 2 * idx, signed)
@@ -279,14 +294,25 @@ class EpEmu:
             flipper_contact=self.dsb('flipper_contact'),
             kick=self.dsb('kick_strength'),
             hits=self.dsw('hit_count'),
-            hit_list=bytes(self.uc.mem_read(self.lin(self.ds, 0x6C20), max(0, min(48, self.dsw('hit_count'))))),
+            hit_list=bytes(self.uc.mem_read(self.lin(self.ds, self.A.get('hit_list', 0x6C20)),
+                                            max(0, min(48, self.dsw('hit_count'))))),
         ))
+        if self.capture_probes:
+            # collision-buffer values under the probes that hit (probe k at ring + 2k, offset y*320 + x)
+            r = self.response_log[-1]
+            i = r['ball']
+            x, y = self.dsw('ball_x', i, signed=False), self.dsw('ball_y', i, signed=False)
+            top = self.dsw('pf_seg_top', signed=False)
+            ring = self.A['ds_vars']['ring']
+            r['xy'] = (x, y)
+            r['probe_colours'] = [self.rb(top + y * 20, (x + self.rw(self.ds, ring + 2 * k, signed=False)) & 0xFFFF)
+                                  for k in r['hit_list']]
 
     def _on_sensor(self, uc, address, size, _):
         # cs:1E66: colour_event_dispatch is about to jump through cs:1E77[al-0xAA].
         al = uc.reg_read(UC_X86_REG_AX) & 0xFF
         handler = self.rw(self.cs, self.A['sensor_table'] + 2 * (al - 0xAA), signed=False) if al >= 0xAA else None
-        self.sensor_log.append((al, self.rb(self.ds, 0x677E), handler))
+        self.sensor_log.append((al, self.dsb('cur_layer') if self.has('cur_layer') else self.rb(self.ds, 0x677E), handler))
 
     # ------------------------------------------------------------------ execution
     def _run(self, cs, ip, stop_ip, limit):
@@ -408,19 +434,46 @@ class EpEmu:
         self.set_dsb('ball_layer', layer, 2 * i)
 
     def set_keys(self, mask):
+        """Input bits as the trace contract and the Swift port define them: 1 left flipper, 2 right
+        flipper, 4 plunger (Ctrl), 8 nudge A (Z / ','), 16 nudge B ('/'), 32 Space."""
         self.set_csb('key_lflip', 1 if mask & 1 else 0)
         self.set_csb('key_rflip', 1 if mask & 2 else 0)
         self.set_csb('key_ctrl', 1 if mask & 4 else 0)
+        for bit, name in ((8, 'key_nudge_a'), (16, 'key_nudge_b'), (32, 'key_space')):
+            if name in self.A['cs_vars']:
+                self.set_csb(name, 1 if mask & bit else 0)
+
+    def end_of_turn_vars(self):
+        """DS offsets of current_player, player_count, ball_number, balls_per_game from the end-of-turn
+        code every table shares with EP1 cs:343E (mov bl,[P]; ...; cmp [PC],bl; jbe +3; jmp ...;
+        inc byte [B]; mov byte [P],0; mov al,[BPG]; inc al; cmp [B],al), or None."""
+        import re
+        code = bytes(self.uc.mem_read(self.lin(self.cs, 0), 0x10000))
+        ms = list(re.finditer(rb'\x8a\x1e(..)(?:\x88\x1e..)?\xb7\x00\x38\x1e(..)\x76\x03(?:\xe9..|\xeb.\x90)'
+                              rb'\xfe\x06(..)\xc6\x06\1\x00\xa0(..)\xfe\xc0\x38\x06\3', code, re.S))
+        if len(ms) != 1:
+            return None
+        u = lambda b: int.from_bytes(b, 'little')
+        m = ms[0]
+        return {'current_player': u(m.group(1)), 'player_count': u(m.group(2)), 'ball_number': u(m.group(3)),
+                'balls_per_game': u(m.group(4))}
 
     def reset_play_state(self):
         """Neutral single-ball play state (used before a scenario)."""
-        for i in range(5):
+        for i in range(self.slots):
             self.set_dsw('ball_active', 0, i)
         for n in ('serve_delay', 'kicker_cooldown', 'event_lockout', 'event_cooldown',
                   'nudge_timer', 'tilt_meter', 'tilted', 'collided', 'flipper_contact', 'kick_strength'):
-            self.set_dsb(n, 0)
-        self.set_dsw('plunger_charge', 0)
-        self.set_dsw('extra_gravity_timer', 0)
+            if self.has(n):
+                self.set_dsb(n, 0)
+        if self.has('event_lockout_array'):          # EP9-13: one sensor lockout per ball slot
+            for i in range(self.slots):
+                self.set_dsb('event_lockout_array', 0, 2 * i)
+        for v in self.A.get('frame_counters', []):   # every countdown of the per-frame counters fragment
+            self.wb(self.ds, v, 0)
+        for n in ('plunger_charge', 'extra_gravity_timer'):
+            if self.has(n):
+                self.set_dsw(n, 0)
         for n in ('key_lflip', 'key_rflip', 'key_up', 'key_down', 'key_space', 'key_ctrl',
                   'key_nudge_a', 'key_nudge_b'):
             self.set_csb(n, 0)

@@ -1,0 +1,19 @@
+{
+ "name": "tilt_meter_trip",
+ "table": 8,
+ "frames": 150,
+ "ball": {
+  "x": 96,
+  "y": 330,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0
+ },
+ "pokes": {
+  "tilt_meter": 82
+ },
+ "description": "fall_left_flipper_held with tilt_meter=82 poked (threshold 80): the nudge/tilt block decrements the meter first and tilts when meter > threshold: original tilted from frame 0 (meter after frame 0: 81); left flipper held but forced to rest when tilted.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1]
+}

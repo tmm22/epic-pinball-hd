@@ -1,0 +1,28 @@
+{
+ "format": "epic-pinball-engine-overrides/1",
+ "table": 10,
+ "exe": "EP10.EXE",
+ "generated_by": "table-verification agent (EP10-13), 2026-09-27; hand-maintained",
+ "status": "tools/export_engine_data.py does not read tools/engine_overrides/ yet. Keys under 'set' are dotted engine.json paths the exporter should write (additively). No game data is stored here: tables are referenced by data-segment offset and word count and must be read from the user's EXE; the rest are code facts (small integers, addresses). cs/ds offsets are unrelocated, entry code segment / data segment as in tools/emu/tables/EPn.json.",
+ "set": {
+  "flipper_kick.gate_note": "if not null: a flipper contact with (u16) ball y < side_min_y does NOT take the side/tip kick: it takes the normal one-pixel push-out (x -= pushout[k].x, y += pushout[k].y, no y -= 1) on every iteration, and on the first response it still continues to the flipper top-kick branch (it is not a plain wall reflection). EP10 has no top_min_y: the top kick (EP1 maths) follows for any y (cs:1B5B..1B65).",
+  "sensors.lockout_per_ball": {
+   "array": "0x3880",
+   "stride": 2,
+   "slots": 3,
+   "scratch": "0x388b",
+   "copy_in": "cs:1174",
+   "copy_out": "cs:11b7",
+   "decrement": "cs:0933 (lockout[0], kicker_cooldown, lockout[1], lockout[2])",
+   "note": "the gravity/scan loop (3 slots) copies the ball's own lockout byte into the scratch lockout the handlers read/write before that ball's pixel scan and back after it; the per-frame counters decrement the 3 array bytes, not the scratch copy. There is no event_cooldown in this table."
+  },
+  "gravity.slots": 3
+ },
+ "evidence": {
+  "flipper gate": "cs:1ad8 cmp byte [flipper_contact],0; je 1b3e | cs:1adf cmp word [di+y],0x12c; jb 1b3e (push-out cs:1b3e..1b4d)",
+  "top kick without y test": "cs:1b5b cmp byte [flipper_contact],0; jne 1b65 -> cs:1b65 (vy zero test 0x28, fx/fy x p3/p4)",
+  "per-ball lockout": "cs:1174 mov cl,[di+3880]; mov [388b],cl ... cs:11b7 mov [di+3880],al",
+  "gravity loop": "cs:11e8 cmp di,6 (slots 0..2); the port loops 5 slots (unobservable while slots 3/4 are never active)",
+  "kicker_hit": "cs:195e: cooldown=4 before the tilt test (cooldown_set_when_tilted); y>=200 branch scores only, no kick override"
+ }
+}

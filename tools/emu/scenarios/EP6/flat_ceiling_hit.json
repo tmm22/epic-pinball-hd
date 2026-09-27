@@ -1,0 +1,15 @@
+{
+ "name": "flat_ceiling_hit",
+ "table": 6,
+ "frames": 120,
+ "ball": {
+  "x": 25,
+  "y": 211,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": -350
+ },
+ "description": "Ball at (25,211) with v=(0,-350): first contact frame 4 step 1 is plain wall (colours E8 EB ED EE), k=13, no kicker.",
+ "inputs": []
+}

@@ -1,0 +1,25 @@
+{
+ "name": "x_multiball_drain_slot1",
+ "table": 11,
+ "frames": 120,
+ "ball": {
+  "x": 222,
+  "y": 239,
+  "xf": 0,
+  "yf": 0,
+  "vx": 300,
+  "vy": 0
+ },
+ "balls": [
+  {
+   "x": 228,
+   "y": 377,
+   "xf": 0,
+   "yf": 0,
+   "vx": 0,
+   "vy": 320
+  }
+ ],
+ "description": "flat_wall_hit ball 0 plus slot 1 at (228,377) falling (vy 320): slot 1 is removed by the drain loop at frame 11 while ball 0 keeps playing.",
+ "inputs": []
+}

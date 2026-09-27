@@ -1,0 +1,15 @@
+{
+ "name": "fall_right_flipper_released",
+ "table": 9,
+ "frames": 150,
+ "ball": {
+  "x": 182,
+  "y": 326,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0
+ },
+ "description": "Free fall from (182,326) onto the resting right flipper (outline 1), no input: first contact frame 25 step 0, k=40.",
+ "inputs": []
+}

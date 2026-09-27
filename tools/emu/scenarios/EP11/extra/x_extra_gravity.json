@@ -1,0 +1,18 @@
+{
+ "name": "x_extra_gravity",
+ "table": 11,
+ "frames": 150,
+ "ball": {
+  "x": 96,
+  "y": 320,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0
+ },
+ "pokes": {
+  "extra_gravity_timer": 30
+ },
+ "description": "fall_left_flipper_released start with the extra-gravity timer poked to 30 (per frame: vy += g + timer, then the timer decays by 1).",
+ "inputs": []
+}

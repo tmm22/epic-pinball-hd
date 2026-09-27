@@ -1,0 +1,17 @@
+{
+ "name": "drain_no_serve",
+ "table": 8,
+ "frames": 60,
+ "ball": {
+  "x": 150,
+  "y": 385,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 200
+ },
+ "on_drain": "continue",
+ "description": "Ball dropped into the drain (y 385, vy 200), on_drain=continue, no input: EP8 has no serve code after its 3-slot drain loop (cs:0A2D..0A9B; cs:0A96 cmp cx,3; jne +0 is a no-op), so slot 0 becomes inactive and stays there (records: 180, last active=0).",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

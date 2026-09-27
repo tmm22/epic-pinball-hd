@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_BA",
+ "table": 13,
+ "frames": 200,
+ "ball": {
+  "x": 12,
+  "y": 78,
+  "xf": 0,
+  "yf": 0,
+  "vx": 57,
+  "vy": -138,
+  "layer": 0
+ },
+ "mode": "rules",
+ "description": "rules mode, level 0: ball (12,78) v=(57,-138) into the BA sensor pixels around (34,48); the original dispatches BA (handler cs:1e36) first at frame 10; colours seen in 40 frames: BA.",
+ "inputs": []
+}

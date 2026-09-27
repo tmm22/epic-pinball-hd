@@ -1,0 +1,18 @@
+{
+ "name": "x_nudge_impulse_wall",
+ "table": 10,
+ "frames": 120,
+ "ball": {
+  "x": 146,
+  "y": 152,
+  "xf": 0,
+  "yf": 0,
+  "vx": -300,
+  "vy": 0
+ },
+ "pokes": {
+  "nudge_timer": 24
+ },
+ "description": "flat_wall_hit start with nudge_timer poked to 24: the nudge impulse branch (cs:1d15) runs 1 times, first at step 36 (no nudge key held, so vx +20 +20 -40).",
+ "inputs": []
+}

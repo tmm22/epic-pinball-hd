@@ -1,0 +1,12 @@
+{
+ "name": "serve_vx2_plunger_held",
+ "table": 5,
+ "frames": 200,
+ "ball": {
+  "x": 150,
+  "y": 400
+ },
+ "description": "Ball 0 below the drain line with the plunger held from frame 0: EP5 serves at (297,346) with vx=2 (cs:0753). The lane block runs the plunger code during the serve delay except when it reaches 1 (cs:0834..0844); while the plunger is held (cs:08B5 charge += 12) nothing clears vx, so vx=2 drives the x accumulator until the release (cs:08E4 vx=0). A player holding the plunger when the ball arrives sees this.",
+ "on_drain": "continue",
+ "inputs": [4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]
+}

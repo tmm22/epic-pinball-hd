@@ -1,0 +1,25 @@
+{
+ "name": "captive_drain_serve",
+ "table": 3,
+ "frames": 200,
+ "ball": {
+  "x": 150,
+  "y": 400
+ },
+ "description": "The real EP3 state: captive ball active in slot 2 (ball_slots_initial; it settles at (232,188)). Ball 0 starts below the drain line. EP3 drain checks slots 1 and 0 only (cs:0763 mov di,4) and serves when both are empty (cs:07A4 cmp cx,2), so ball 0 is served at (297,350) with the captive ball still in play, then plunged. Slot 1 is given at y=400 with active=0 (harness) so that a port which ignores `active` drains it in the same frame-0 drain check.",
+ "balls": [
+  {
+   "x": 201,
+   "y": 400,
+   "active": 0
+  },
+  {
+   "x": 232,
+   "y": 188,
+   "vx": 0,
+   "vy": 0
+  }
+ ],
+ "on_drain": "continue",
+ "inputs": [0,0,0,0,0,0,0,0,0,0,0,0,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a physics scenario on the ORIGINAL EP1.EXE code (Unicorn) and write a JSONL trace.
+"""Run a physics scenario on the ORIGINAL table code (EPn.EXE under Unicorn) and write a JSONL trace.
 
 Usage:
   .venv/bin/python tools/emu/run_scenario.py SCENARIO.json [-o OUT.jsonl] [--mode physics|rules|full]
@@ -7,9 +7,14 @@ Usage:
   .venv/bin/python tools/emu/run_scenario.py --batch OUT_DIR SCENARIO.json|DIR ...   (one boot; used by swift test)
 
 Scenario (see tools/emu/trace_schema.json, "scenario"):
-  {"table": 1, "frames": N,
-   "ball": {"x":..,"y":..,"xf":0,"yf":0,"vx":..,"vy":.., "layer":0},
-   "inputs": [mask per frame; 1=left flipper, 2=right flipper, 4=plunger],   (missing frames = 0)
+  {"table": 1, "frames": N,                                                 (table 1..13)
+   "ball": {"x":..,"y":..,"xf":0,"yf":0,"vx":..,"vy":.., "layer":0, "active":1},   (active optional, default 1)
+   "balls": [{"x":.., "y":.., ...}, ...],                                  (optional, slots 1..4 in order, as the port reads it)
+   "extra_balls": [{"slot": 2, "x":.., "y":.., ...}],                        (optional, other slots by number)
+   "inputs": [mask per frame; 1=left flipper, 2=right flipper, 4=plunger, 8=nudge Z, 16=nudge /, 32=Space],
+                                                                             (missing frames = 0)
+   "ds_pokes": [[offset, value, width], ...]   raw data-segment writes after "pokes" (optional)
+   "players", "balls_per_game": game options as DS bytes (optional)
    "params": {"gravity": 4, ...} or [10 values / null],                      (optional)
    "on_drain": "stop" | "continue",                                          (optional, default "stop")
    "mode": "physics" | "rules" | "full"}                                     (optional, default "physics")
@@ -50,12 +55,31 @@ def setup(scn, mode=None):
         emu.set_params(scn['params'])
     b = dict(scn['ball'])
     emu.set_ball(0, x=b['x'], y=b['y'], xf=b.get('xf', 0), yf=b.get('yf', 0),
-                 vx=b.get('vx', 0), vy=b.get('vy', 0), layer=b.get('layer', 0))
+                 vx=b.get('vx', 0), vy=b.get('vy', 0), layer=b.get('layer', 0), active=b.get('active', 1))
+    for i, eb in enumerate(scn.get('balls', [])[:4]):   # the Swift port's form: slots 1..4 in order
+        emu.set_ball(i + 1, x=eb['x'], y=eb['y'], xf=eb.get('xf', 0), yf=eb.get('yf', 0),
+                     vx=eb.get('vx', 0), vy=eb.get('vy', 0), layer=eb.get('layer', 0), active=eb.get('active', 1))
+    for eb in scn.get('extra_balls', []):          # e.g. EP3's captive ball in slot 2
+        emu.set_ball(eb['slot'], x=eb['x'], y=eb['y'], xf=eb.get('xf', 0), yf=eb.get('yf', 0),
+                     vx=eb.get('vx', 0), vy=eb.get('vy', 0), layer=eb.get('layer', 0), active=eb.get('active', 1))
+    if scn.get('players') is not None or scn.get('balls_per_game') is not None:
+        eot = emu.end_of_turn_vars()        # the options PINBALL.EXE passes, as DS bytes
+        if eot is None:
+            raise ep_emu.EmuError('players/balls_per_game: end-of-turn counters not found in this table')
+        if scn.get('players') is not None:
+            emu.wb(emu.ds, eot['player_count'], int(scn['players']))
+        if scn.get('balls_per_game') is not None:
+            emu.wb(emu.ds, eot['balls_per_game'], int(scn['balls_per_game']))
     for k, v in scn.get('pokes', {}).items():      # raw DS pokes, e.g. {"kicker_cooldown": 0}
+        if k in ('extra_gravity', 'gravity_extra'):  # aliases (Swift port / engine.md names)
+            k = 'extra_gravity_timer'
         if k in ('plunger_charge', 'extra_gravity_timer'):
             emu.set_dsw(k, v)
         else:
             emu.set_dsb(k, v)
+    for off, v, w in scn.get('ds_pokes', []):    # raw DS offsets (rule state without a name), last
+        off = int(off, 16) if isinstance(off, str) else int(off)
+        (emu.ww if int(w) == 2 else emu.wb)(emu.ds, off, int(v))
     return emu
 
 
@@ -68,9 +92,10 @@ def run(scn, mode=None, frames=None, sensor_log=None, frame_state=None):
     on_drain = scn.get('on_drain', 'stop')
     inputs = scn.get('inputs', [])
     emu = setup(scn, mode)
+    drain_y = emu.A.get('drain_y', DRAIN_Y)
     out = []
     for f in range(frames):
-        if on_drain == 'stop' and emu.dsw('ball_y') >= DRAIN_Y:
+        if on_drain == 'stop' and emu.dsw('ball_y') >= drain_y:
             break
         emu.set_keys(inputs[f] if f < len(inputs) else 0)
         emu.sensor_log = []
@@ -81,7 +106,8 @@ def run(scn, mode=None, frames=None, sensor_log=None, frame_state=None):
         if sensor_log is not None and emu.sensor_log:
             sensor_log.append((f, list(emu.sensor_log)))
         if frame_state is not None:
-            frame_state.append(dict(event_lockout=emu.dsb('event_lockout'), event_cooldown=emu.dsb('event_cooldown')))
+            frame_state.append(dict(event_lockout=emu.dsb('event_lockout') if emu.has('event_lockout') else 0,
+                                    event_cooldown=emu.dsb('event_cooldown') if emu.has('event_cooldown') else 0))
         for s in range(3):
             try:
                 resp = emu.physics_step()
@@ -108,7 +134,7 @@ def run(scn, mode=None, frames=None, sensor_log=None, frame_state=None):
                     flipper_contact=first[0]['flipper_contact'] if first else 0,
                     kick=first[0]['kick'] if first else 0,
                     lflip_moving=emu.dsb('lflip_moving'), rflip_moving=emu.dsb('rflip_moving'),
-                    plunger_charge=emu.dsw('plunger_charge'),
+                    plunger_charge=emu.dsw('plunger_charge') if emu.has('plunger_charge') else 0,
                 ),
             )
             out.append(rec)

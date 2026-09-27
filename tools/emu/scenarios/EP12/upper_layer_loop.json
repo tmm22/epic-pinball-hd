@@ -1,0 +1,16 @@
+{
+ "name": "upper_layer_loop",
+ "table": 12,
+ "frames": 250,
+ "ball": {
+  "x": 264,
+  "y": 87,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": -450,
+  "layer": 1
+ },
+ "description": "Ball on the upper level (layer 1) at (264,87) with (0,-450): only level-1 colours A1..A7 collide; 172 responses in 250 frames.",
+ "inputs": []
+}

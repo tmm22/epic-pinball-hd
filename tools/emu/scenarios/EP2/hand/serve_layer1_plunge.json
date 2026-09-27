@@ -1,0 +1,12 @@
+{
+ "name": "serve_layer1_plunge",
+ "table": 2,
+ "frames": 240,
+ "ball": {
+  "x": 150,
+  "y": 400
+ },
+ "description": "Ball 0 starts below the drain line (y=400): the frame-0 drain check (EP2 cs:0A41) empties the last slot and serves at (284,338) with ball_layer[0]=1 (cs:0AFB, not in engine.json serve). EP2 plunger lane has no layer test (cs:0BB4..0BC9, EP1 has cs:0AA4), so the plunge at frames 12..69 launches a layer-1 ball.",
+ "on_drain": "continue",
+ "inputs": [0,0,0,0,0,0,0,0,0,0,0,0,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]
+}

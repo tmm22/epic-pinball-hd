@@ -1,0 +1,18 @@
+{
+ "name": "bumper_hit_cooling",
+ "table": 2,
+ "frames": 200,
+ "ball": {
+  "x": 135,
+  "y": 74,
+  "xf": 0,
+  "yf": 0,
+  "vx": -212,
+  "vy": 212
+ },
+ "description": "bumper_hit with kicker_cooldown=4 at frame 0 (2 left at the first contact in frame 1): while cooling, CF/D0 are plain wall (cs:1A15..1A1A jne -> append at cs:1A31); the window test is not reached.",
+ "pokes": {
+  "kicker_cooldown": 4
+ },
+ "inputs": []
+}

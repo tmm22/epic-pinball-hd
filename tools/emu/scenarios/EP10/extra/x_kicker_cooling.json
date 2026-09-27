@@ -1,0 +1,18 @@
+{
+ "name": "x_kicker_cooling",
+ "table": 10,
+ "frames": 200,
+ "ball": {
+  "x": 180,
+  "y": 33,
+  "xf": 0,
+  "yf": 0,
+  "vx": -300,
+  "vy": 0
+ },
+ "pokes": {
+  "kicker_cooldown": 3
+ },
+ "description": "bumper_hit start with kicker_cooldown poked to 3: the first contact (frame 0 step 2, k=25) is on the kicker while it cools (contact, no kick).",
+ "inputs": []
+}

@@ -1,0 +1,15 @@
+{
+ "name": "bumper_hit_2",
+ "table": 9,
+ "frames": 200,
+ "ball": {
+  "x": 152,
+  "y": 105,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 300
+ },
+ "description": "Ball at (152,105) with v=(0,300) into the kicker cluster around (159,136) (colours D1, 489 px): first contact frame 0 step 2, k=36, kick 7.",
+ "inputs": []
+}

@@ -1,11 +1,12 @@
 # Table rules: EP1 decode and the `epic-pinball-rules/1` format
 
 Status: EP1's sensor handlers and the rule fragments in its main loop are decoded and
-lifted to JSON by `tools/rules.py`. A differential test runs the lifted rules
-against the original machine code in an emulator and they agree. EP2 and EP10 go
-through the same lifter without annotations to test how far the format stretches.
-Everything here is static analysis, plus emulation of isolated routines with Unicorn.
-The game itself has not been run in DOSBox-X.
+lifted to JSON by `tools/rules.py`, with names and descriptions. **All 13 tables** go through
+the same lifter; for EP2-EP13 the main-loop and end-of-ball rule fragments (hooks) are found
+automatically by pattern (section 4.1). A differential test (`tools/emu/verify_rules.py`,
+section 5) runs every lifted handler and hook against the original machine code in an emulator:
+**0 failures on all 13 tables**. Everything here is static analysis plus emulation of isolated
+routines with Unicorn. The game itself has not been run in DOSBox-X for rules.
 
 Confidence tags: **[H]** read from code and confirmed by the differential test,
 **[M]** read from code, meaning inferred (for example what a sensor is physically),
@@ -15,9 +16,12 @@ Addresses: `cs:XXXX` is EP1 code segment 0x3223 (file `0x32630+XXXX`) and `ds:XX
 is EP1 data segment 0x0015 (file `0x550+XXXX`), as in engine.md.
 
 ```
-.venv/bin/python tools/rules.py 1 2 10 --report          # -> extracted/tables/EPn/rules.json
+.venv/bin/python tools/rules.py 1 2 3 4 5 6 7 8 9 10 11 12 13 --report   # -> extracted/tables/EPn/rules.json
 .venv/bin/python tools/rules.py 1 --no-write --dump h2379 # one handler as readable text ("all" for everything)
-.venv/bin/python scratch/rules/verify_ir.py 1 300          # IR interpreter vs Unicorn on the real code
+.venv/bin/python tools/rules.py 1 --hooks-check            # automatic hook discovery (EP1: compared with EP1_HOOKS)
+.venv/bin/python tools/rules.py 2 10 --no-auto-hooks       # the output before automatic hooks (kicker/dispatch_tail only)
+.venv/bin/python tools/emu/verify_rules.py --all [--trials 300] [--json OUT]   # lift vs original code, every table
+.venv/bin/python scratch/rules/verify_ir.py 1 300          # the original EP1/EP2/EP10 verifier (superseded)
 .venv/bin/python scratch/rules/render_sensors.py 1         # scratch/rules/ep1_sensors.png (annotated map)
 .venv/bin/python scratch/rules/summary.py 10               # compact per-handler summary
 ```
@@ -237,7 +241,7 @@ to rendering and audio.
 | `stub_routines` | display-only routines called from rule code (message/text/number/refresh), near or far. Exception: EP1 `0x3af8` (`display:idle_text`, hand-classified) also does `if tilted == 1: mode = 0` (cs:3B16..3B1D). Inside the lifted hooks it is only called from `next_ball_skill`, where `tilted` is always 0, but the main loop calls it when a message times out (cs:0A2E), so an app must reproduce that write |
 | `sensors` | list of `{colour, value, level, handler, fires_when_tilted, ignores_lockout, regions:[{bbox, pixels, branch, branch_name}]}`. `branch` = the first block reached after the handler's position tests for a ball centred on that region |
 | `handlers` | `hXXXX` -> `{entry, colours, summary, op_counts, kickouts, name, desc, conf, tags}` |
-| `hooks` | `kicker`, `dispatch_tail` (EP2/EP10), and the EP1 main-loop fragments: `{entry, stops, desc, summary}` |
+| `hooks` | `kicker`, `dispatch_tail` (EP2, EP3, EP4, EP7, EP8, EP10), the EP1 main-loop fragments (hand annotation) and, for EP2-EP13, the automatic ones (section 4.1): `{entry, stops, desc, conf, summary}`. Automatic hooks (`conf: "auto"`) add `kind` (`frame_timers`, `frame_counters`, `drain`, `flipper_press`, `lamp_timer`, `main`, `ball_end`), `when` (`every_frame`: run in main-loop order once per frame; `ball_end`: from the end-of-ball routine) and, for `ball_end` hooks, `continues` (`{cut ip: next hook}`: where the original resumes after the display call that ends the hook) |
 | `blocks` | `Lxxxx` -> `{ip, ops:[...], end}`. Shared between handlers, hooks and gosubs |
 | `coverage` | op counts: semantic / state updates / low-level / unexpressed |
 
@@ -253,7 +257,9 @@ JSON values: an integer, or a list `[op, args...]`:
   allowed, but reading it is an error that never happens on a feasible path (see 5).
 * Arithmetic: `add sub mul and or xor shl shr sar neg lo hi setlo sethi join lo16 hi16 mul32 div32 mod32 div mod
   sext8 ltu`. Evaluate on mathematical integers and **truncate at stores, conditions, memory addresses, and in
-  `lo/hi/shr/div/join/setlo/sethi/shl/neg`**. This reproduces 16-bit two's-complement behaviour. `join(hi,lo)`
+  `lo/hi/shr/div/join/setlo/sethi/shl/neg`**. This reproduces 16-bit two's-complement behaviour.
+  **Shift counts are taken mod 32** (`shl/shr/sar`), as on the 80186 and later: EP9 cs:2e07 shifts by a
+  counter that can exceed 31, where `1 << 33` is 2, not 0 [H, differential test]. No EP1/EP2/EP10 code reaches a count above 15. `join(hi,lo)`
   builds a dword. `ltu(a,b,w)` is 1 if a < b unsigned (the carry of an add).
 
 ### 3.3 Ops
@@ -303,8 +309,10 @@ Load DS from the EXE, then per frame and ball: copy the slot to `ball.*`, clear 
 (lockout/cooldown rules, dispatcher filters by level and tilt, entry `ax = value`, `bx = handler ip`), run the handler, write
 back. Call the `kicker` hook on active-surface contact. EP1 hooks: run `frame_timers`, `frame_counters`,
 `flipper_lane_change`, `lamp_flash`, `iq_display` every frame, `drain` on drain, and `ball_end` / `bonus_count` /
-`bonus_multiplier_payout` / `next_ball_skill` at the end of a ball. Implement the sound queue and sweeps from
-`sound_sweeps`, lamp drawing from the lamp bytes, and messages from the live DS bytes.
+`bonus_multiplier_payout` / `next_ball_skill` at the end of a ball. EP2-EP13: run the `when: "every_frame"` hooks once per frame
+in `entry` order (main-loop order), and at the end of a ball the `ball_end` hooks from the first one, following `continues`
+after each stop (a stop without a `continues` entry ends the sequence; the regions in between are display code).
+Implement the sound queue and sweeps from `sound_sweeps`, lamp drawing from the lamp bytes, and messages from the live DS bytes.
 
 Entry registers (checked with a def-use pass over the graphs, `scratch/verify-rules/entry_regs.py`): sensor handlers read
 only `ax` (EP1 h20bd/h2869/h2658/h279b/h27e6, EP2 h20d5/h2bba). The `kicker` hook reads `di` = **2 x ball slot index**
@@ -314,20 +322,86 @@ never used, so the interpreter only needs *some* defined value there: start ever
 
 ---
 
-## 4. Generic pass on EP2 and EP10 (same engine family, no annotations)
+## 4. All tables (same engine family; names only for EP1)
 
-`tools/rules.py 2 10` finds the engine variables by code patterns: score (add/adc pairs), ball working copy and writeback,
+`tools/rules.py N` finds the engine variables by code patterns: score (add/adc pairs), ball working copy and writeback,
 lamp table (the `lamp_update` caller inside the player block), player block, sound queue/rate/now/sweeps, tilt, lockout,
-cooldown, kicker, gates, and the dispatcher tail. Results:
+cooldown, kicker, gates, and the dispatcher tail. The ball slot arrays, the keyboard flags (`["input", ...]`) and the main-loop
+layout come from the emulator harness's per-table search (`tools/emu/discover.py`, emulation.md section 10), because EP3,
+EP5 and EP6 lay the slot arrays out differently from EP1. Results (300 random trials per target plus the directed phase):
 
-| | EP1 | EP2 | EP10 |
-|---|---|---|---|
-| handlers / hooks / blocks | 20 / 12 / 303 | 10 / 2 / 293 | 12 / 2 / 172 |
-| ops: semantic / state / low-level / unexpressed | 348 / 221 / 168 / 0 | 280 / 217 / 83 / 0 | 274 / 128 / 81 / 0 |
-| named variables | 69 of 101 | 5 of 66 | 3 of 57 |
-| differential test (handlers+hooks, 300 trials each) | 0 failures | 0 failures | 4 failures, all out-of-range state (item 5); 0 with `FULLSEG=1` |
+| table | handlers | hooks | blocks | ops semantic / state / low-level / unexpressed | named vars (roles) | differential test: equal / compared, failures | blocks executed |
+|---|---|---|---|---|---|---|---|
+| EP1 | 20 | 12 (EP1_HOOKS, hand) | 303 | 348 / 221 / 168 / 0 | 69 of 101 | 9660 / 9675, 0 | 293 / 303 |
+| EP2 | 10 | 17: kicker, dispatch_tail, 10 main-loop, 5 end-of-ball | 491 | 339 / 343 / 261 / 0 | 6 of 120 | 8299 / 8376, 0 | 460 / 491 |
+| EP3 | 19 | 10: kicker, dispatch_tail, 5 + 3 | 175 | 168 / 93 / 78 / 0 | 5 of 56 | 8671 / 8727, 0 | 175 / 175 |
+| EP4 | 12 | 13: kicker, dispatch_tail, 7 + 4 | 325 | 281 / 237 / 255 / 0 | 7 of 103 | 7472 / 7551, 0 | 291 / 325 |
+| EP5 | 14 | 7: kicker, 3 + 3 | 106 | 105 / 49 / 68 / 0 | 5 of 32 | 6249 / 6300, 0 | 103 / 106 |
+| EP6 | 17 | 10: kicker, 4 + 5 | 270 | 275 / 183 / 165 / 1 | 5 of 81 | 8109 / 8127, 0 | 268 / 270 |
+| EP7 | 13 | 14: kicker, dispatch_tail, 7 + 5 | 385 | 325 / 288 / 250 / 0 | 7 of 120 | 8148 / 8208, 0 | 369 / 385 |
+| EP8 | 18 | 16: kicker, dispatch_tail, 10 + 4 | 325 | 458 / 181 / 119 / 3 | 6 of 85 | 10095 / 10242, 0 | 309 / 325 |
+| EP9 | 16 | 19: kicker, 14 + 4 | 348 | 148 / 255 / 298 / 22 | 4 of 164 | 10069 / 10527, 0 | 305 / 348 |
+| EP10 | 12 | 15: kicker, dispatch_tail, 9 + 4 | 370 | 311 / 242 / 302 / 0 | 5 of 111 | 8157 / 8208, 0 | 326 / 370 |
+| EP11 | 15 | 15: kicker, 11 + 3 | 391 | 317 / 211 / 282 / 0 | 5 of 117 | 9030 / 9045, 0 | 358 / 391 |
+| EP12 | 19 | 17: kicker, 13 + 3 | 431 | 335 / 251 / 345 / 0 | 5 of 130 | 10617 / 10839, 0 | 395 / 431 |
+| EP13 | 20 | 16: kicker, 12 + 3 | 374 | 273 / 217 / 293 / 0 | 5 of 115 | 10802 / 10833, 0 | 343 / 374 |
 
-What the lift found in them [H for the code, M for any physical meaning]:
+"compared" counts every random and directed trial. The ones not "equal" are `undefined` (the IR reads a register that a stubbed
+display call clobbers; the original's result then depends on the display routine, which the test does not model) or `skipped`
+(an op the IR cannot run, the interpreter's step limit, or the original not returning, as in section 4.4 item 8). None is a mismatch. EP1's `rules.json` is byte-identical to the
+earlier output, and EP2/EP10 are byte-identical with `--no-auto-hooks`.
+
+### 4.1 Main-loop hook discovery by pattern [H for EP1's six fragments, M for the others]
+
+`auto_hooks()` in `tools/rules.py` replaces the EP1-only hand annotation for EP2-EP13; `EP1_HOOKS` stays as EP1's override.
+
+1. **Main loop** (`main_loop`..`frame_sync` from discover.py). It is split into *statements*: an instruction boundary that no
+   branch crosses (a branch may land on it) and that does not separate a flag setter from its jcc. Jumps back to the main-loop
+   head ("restart the frame", EP10 cs:0bb9) are treated as exits. Each statement is therefore single-entry and single-exit.
+2. The engine's own ball fragments are excluded (plunger lane/launch, nudge/tilt, gravity plus object scan). The per-frame counters
+   and the drain loop stay as candidates: they are rule code too (EP1 `frame_counters`, `drain`).
+3. A statement is kept if it **lifts completely**. That means only rule-like near calls (gosub) and the display, sound and gate
+   routines the lifter stubs; no port I/O, interrupts, string ops, far calls into the graphics library or indirect jumps.
+   It must also **write rule state**. Rule state is a DS address the sensor handlers or the kicker read or write, the lamp
+   table, the score, or an engine role other than the ball and sound. It grows to a fixpoint: a statement is rule code if it
+   writes something that rule code reads. Writes that touch only sound/sweep variables or the ball slot arrays do not count.
+4. Adjacent kept statements are merged, with the register set-up statements between them. Statements of more than 12
+   instructions form their own hook. A counters or drain fragment is always one hook.
+5. **End of ball**: `ball_lost_fade` (discover.py) is cut into *regions*. Control flow is followed from the routine entry and
+   cut at every instruction the lifter cannot express (fades, waits, graphics calls); the instruction after a cut starts the
+   next region. Regions that write rule state and do not pop values pushed before their start become `ball_end_XXXX` hooks,
+   with `continues` giving the next region after each cut.
+6. After lifting, any automatic hook with an unexpressed op is dropped and the table is lifted again (EP5 cs:1f4a).
+
+**Check on EP1** (`--hooks-check`): the automatic run finds all six EP1 main-loop fragments of `EP1_HOOKS` with the same entry
+and stop: `frame_timers` 06E2..0711, `frame_counters` 09DC..0A17, `drain` 0A31..0A9A, `flipper_lane_change` 102E..1080,
+`lamp_flash` 10D0..10F5, `iq_display` 1134..119F. It also finds two display-side fragments the annotation leaves out: 04D2..06E2
+(the attract/high-score text cycle, which writes the number buffer ds:5875) and 111E..1134 (a score redraw request, flag
+ds:06D5). `mode_timer` and `bonus_count` are included as gosubs. The end-of-ball annotation (`ball_end` 333E..33E4,
+`bonus_multiplier_payout` 33E7..340D, `next_ball_skill` 358E) is covered by regions with other boundaries: 3320 (through
+bonus count and payout, cut at the display calls 3436 and 358E) and 3593 (`next_ball_skill` after its first display call).
+So the end-of-ball split is **not** reproduced exactly. The code is covered, but at different cut points.
+
+`kind` is a shape label only: `frame_timers` (contains the extra-gravity decay), `frame_counters` (decrements the sensor lockout
+or another per-frame counter from discover.py), `drain` (compares a ball y with the drain line), `flipper_press` (reads a
+flipper key flag), `lamp_timer` (a countdown that writes lamp slots), `main` (anything else), `ball_end`.
+
+### 4.2 Lifter changes made for the other tables (EP1 output unchanged)
+
+* `sbb` after a register `sub` (32-bit subtract in a register pair, EP9-13 number formatting), and `shl lo,1; rcl hi,1`
+  (32-bit shift, EP4 cs:2911 and EP7 cs:1a7b): lifted with `ltu` / the shifted-out bit.
+* **Flags across a join** (EP8 kicker cs:1b18): when every block that can supply the flags of a jcc ends with a compare of the
+  same width, those blocks copy their operands to `fa`/`fb` and the join tests `cmp(fa, fb)`.
+* **Dead-register elimination across gosubs**: a `gosub` now reads the registers its callee reads before writing them. The old
+  pass deleted `mov si,0Fh` before EP3 `call 2D1Ch` (a delay loop counted by SI). The verifier found this; EP1, EP2 and EP10
+  have no such case, so their output did not change.
+* Display routines that switch DS to a constant segment before any write (EP4 cs:c5cb, EP6 cs:41a0, EP8 cs:a42f) are stubbed
+  like the message and text routines (`display` op). This is not applied to EP1.
+* A hook may start where another hook stops (adjacent automatic hooks). Only control flow *reaching* a stop from elsewhere
+  returns there.
+
+### 4.3 Findings per table (unannotated) [H for the code, M for any physical meaning]
+
 * **EP2**: kickout back to the plunger lane (B1: hold 70, eject (284,338) v=0); level changes on D1/D2/B1/D0; score values from
   DS tables (`ds:084E + 4*n`); per-player lamp tables inside the player block (lamps at ds:530A, 60 slots); three pitch sweeps.
   The null handler and the dispatcher's non-dispatch exit both jump to **shared rule code at cs:3045 (`dispatch_tail`)**,
@@ -337,13 +411,19 @@ What the lift found in them [H for the code, M for any physical meaning]:
   6-target bank bitmask check). Rule **subroutines** (cs:2C6D returns its result in the carry flag, `stc`/`clc`; cs:2CF1 advances
   a 10-step lamp ladder) are lifted as `gosub` + `cf`.
 
-**What the schema could not express, or expresses only generically:**
-1. **Main-loop rule fragments are not found automatically.** For EP1 they are listed by hand (`EP1_HOOKS`: entry and stop
-   addresses). EP2 and EP10 get only `kicker` and `dispatch_tail`. Their timers, lane change, drain, end of ball, bonus and
-   light-show code are missing until someone annotates them. This is the main gap.
-2. **Unnamed state.** Without annotations, 95% of EP2/EP10 variables are `vXXXX`. The graphs are exact but opaque (for example
+* **All tables**: the hook discovery finds a `frame_counters` hook in all 12. It finds a `drain` hook in EP2, EP4, EP7, EP8 and
+  EP10-13; in EP3, EP5, EP6 and EP9 the drain fragment writes nothing that counts as rule state, so there is no drain hook. It
+  finds an extra-gravity `frame_timers` hook in EP9-13 (the tables with an extra-gravity term) and a `flipper_press` hook (EP1's
+  lane-change shape) in EP2, EP3, EP6, EP7, EP9, EP11, EP12 and EP13.
+
+### 4.4 What the schema could not express, or expresses only generically
+1. **Main-loop rule fragments are found by pattern, not understood.** Section 4.1 finds them for EP2-EP13 and names them only by
+   shape (`frame_counters`, `drain`, `flipper_press`, `main`, ...). What a `main_XXXX` hook means (a light show, a mode timer, an
+   attract-mode text cycle) is not known. Some automatic hooks are display-side code that happens to write rule state; they lift
+   and verify, so running them is harmless, but they are not all rules.
+2. **Unnamed state.** Without annotations, 95% of the EP2-EP13 variables are `vXXXX`. The graphs are exact but opaque (for example
    progression bytes, mode numbers and lamp meanings).
-3. **Dispatcher-tail rules** (EP2, EP10) run after every sensor event, even for colours without a handler and while
+3. **Dispatcher-tail rules** (EP2, EP3, EP4, EP7, EP8, EP10) run after every sensor event, even for colours without a handler and while
    tilted. They are a hook, not a sensor action. The app must call `dispatch_tail` on every dispatcher call.
 4. **Engine-coupled conditions live outside the rules**: EP2's conditional active surface (collision.md: CF-D0 only when
    `[5560]==0` inside an x/y window) sits in the collision loop. The kicker hook reads `contact_colour`. EP8's runtime
@@ -353,46 +433,62 @@ What the lift found in them [H for the code, M for any physical meaning]:
    The EP10 differential failures (4 of 4200 trials, all in h2759) are this case, with random counter values the game should
    never reach. They disappear when the interpreter models the full 64 KB window (`FULLSEG=1`).
 6. **Light shows / animations** (EP2 `show_table_pointers`, the spinner, EP10's eye) are main-loop display code, not rules.
-7. Flag-dependent branches the lifter cannot model produce `["flags"]` conditions. None occur in the three tables. `jb/jae` after
-   `inc/dec` (CF unchanged) would hit this.
+7. Flag-dependent branches the lifter cannot model produce `["flags"]` conditions. The one case in the 13 tables, EP8's kicker
+   (cs:1b20 `jne` after a join of two compare paths), is now resolved (section 4.2); none remain. `jb/jae` after `inc/dec`
+   (CF unchanged) would still hit this.
+8. **Not expressible, left as `asm`/`call` ops** (`coverage.unexpressed`): EP6 cs:31e1 (1 call; not rule-like), EP8 cs:3613
+   (3 calls; copies with `rep movs` into DS), and EP9 handler h29c6 (22 ops: `out` port writes and writes through a non-DS
+   segment, a palette/display effect [M]). The verifier cannot run h29c6 (every trial is skipped); everything else in these
+   tables runs. EP5's end-of-ball region cs:1f4a was dropped because an `adc` there has no preceding `add` to pair with.
 
 ## 5. Verification
 
-`scratch/rules/verify_ir.py N trials` builds a random DS state for each handler and hook. It starts from the EXE's initial DS,
-randomises the rule variables towards the constants the handler compares against, puts the ball inside the sensor's regions,
-and uses random registers. It then runs (a) the JSON IR interpreter and (b) Unicorn on the **original code** from the handler
-entry, with the dispatcher's stack frame. Only the display routines are stubbed. The resulting DS bytes, collision-buffer bytes and
-display calls (message/text/number/refresh) are compared.
+`tools/emu/verify_rules.py` (all tables; it generalises `scratch/rules/verify_ir.py`) runs, for every handler and hook in
+`rules.json`, (a) the JSON IR interpreter (the same ~300-line class an app implements) and (b) Unicorn on the **original code**
+from the handler/hook entry. Handlers get the dispatcher's stack frame; hooks run to their `stops`. Only the display routines
+are stubbed. DS bytes, collision-buffer bytes and display calls (message with its mode, text, number, refresh) are compared.
+The flipper keys (`["input", ...]`) are random, and both sides see them at the table's CS key bytes (discover.py). Two phases
+per target:
 
-* EP1, 300 trials each: all 20 handlers and 12 hooks agree (0 failures). `bonus_multiplier_payout` skips some trials where a
-  random multiplier near 65535 exceeds the interpreter's step limit.
-* EP2, 300 trials: 0 failures. EP10, 300 trials: 4 failures in h2759 (item 5 in section 4), and 0 with `FULLSEG=1`. Some EP10 trials read an `unknown` register
-  (after a display call), and only for states where the original code would also use a clobbered register.
+* **Random** (N trials, default 300): a state from the EXE's initial DS, with rule variables randomised towards the constants the
+  target compares against, the ball inside the sensor's regions, and random registers.
+* **Directed**: for every block the random phase never executed, the verifier takes a random path from the entry. It runs the
+  path's `reg`/`set`/`store`/`lamp`/`ball` ops symbolically so each branch condition is an expression over the *initial* state.
+  It solves the conditions on variables, memory, ball, lamp, slot and input fields against constants greedily (it also sees
+  through `and` masks and `add`/`sub` offsets). It tries small +-1/+-2 offsets and "array fill" variants (the same value in
+  neighbouring bytes/words, for loops over tables). It keeps a state only if the interpreter really reaches the block, and then
+  runs that state differentially.
+* The whole 64 KB DS window is modelled by default: past `data_segment_size` it is the playfield image, as in the original.
+  `--no-fullseg` compares only the exported range, and then EP1, EP2 and EP10 show 3, 11 and 17 failures, all reads or writes past
+  `data_segment_size` (section 4.4 item 5).
 
-**Coverage of the random test (verifier, 2026-09-27).** At 300 trials per target, 42 of EP1's 303 blocks are never executed by
-any target (74 of 402 per-target reachable blocks). They include the drop-target bank completion and physical-level advance
-(L20EC..L2185), the whole right-hole award including both multiballs (L28F3..L2AB5), the android-level advances (L2B9E, L2C4B,
-L2C87, L2CDF), the kicker-lit right-sink award (L25AE), mode expiry (L3BE9..L3C0B) and the drain slot-free path (L0A46..L0A77),
-because the random states rarely hit the exact timer and level values. `scratch/verify-rules/directed.py` builds those states on
-purpose (451 cases x 3 trials: every android level with its objective full/empty, every phys level at the right-hole award,
-bank completion armed/unarmed, all modes on both ramps, mode expiry for every mode, drain masks). It found **0 mismatches**
-and covers 49 of the 50 missing blocks. The one left, L2017 (clamping `bonus_mult` above 5 after the increment), is dead code.
-With 20,000 random trials and `FULLSEG=1`, EP1 h21bd and h2869 show 1-byte collision-buffer differences. These are the same
-out-of-range class: a random `test_step`/`phys_level` makes an indexed store land past `data_segment_size`, which in the
-original aliases the playfield, but `FULLSEG` models that tail as a separate copy. Stubbed display calls are compared by
-`bx`/`di` (and, in the verifier's copy, the message `ax` mode). The digits `number_text` writes and the `outside_playfield`
-write are not compared. EP2 and EP10 have the same gap: at 300 trials 58 of 293 (EP2) and 42 of 172 (EP10) blocks are never executed,
-and at 5,000 trials 49 and 16 still are. EP2's `kicker` body is only reached when slot 0's layer byte is 0 and the table is not tilted,
-which the random state almost never sets. It agrees with the original when forced (`KLAYER0=1` in the verifier's copy). EP2/EP10
-have not had a directed test.
+**Results (2026-09-27, 300 random trials per target + directed): 0 failures on all 13 tables**. The per-table numbers are in the
+section 4 table. EP1 gives the same result as before (0 failures), and the directed phase now reaches 293 of EP1's 303 blocks
+automatically. The earlier hand-written `scratch/verify-rules/directed.py` reached 49 of the 50 missing blocks. The 10 still
+unreached include L2017, which is dead code. EP3 reaches all 175 blocks. Blocks never executed per table: EP1 10, EP2 31, EP3 0,
+EP4 34, EP5 3, EP6 2, EP7 16, EP8 16, EP9 43 (2 of them in the unrunnable handler h29c6), EP10 44, EP11 33, EP12 36,
+EP13 31. Lists are in the verifier's JSON (`never`).
+A second run with 2,000 random trials per target (seed 99; 772,000 random trials plus the directed phase over the 13 tables)
+also has **0 failures**. It executes EP1 298/303, EP2 461/491, EP3 174/175, EP4 302/325, EP5 103/106, EP6 269/270,
+EP7 374/385, EP8 308/325, EP9 313/348, EP10 335/370, EP11 365/391, EP12 401/431 and EP13 347/374 blocks.
 
-Caveats: this checks the lift against the code, not the code against the running game. Random states can be unreachable ones.
-Display calls are compared by arguments only.
+What the verifier found and what was fixed:
+* **Lifter bug**: dead-register elimination ignored registers read by a gosub callee. The EP3 end-of-ball delay loop ran 0x3908
+  times instead of 15 (section 4.2). Fixed.
+* **IR semantics**: shift counts mod 32 (section 3.2, EP9 cs:2e07). The interpreter must mask the count.
+* EP8 kicker: a `["flags"]` join that made all its trials unrunnable. Now lifted (section 4.2).
+* A verifier bug (full-segment writes into the playfield alias were not folded back) caused false failures in the EP2/EP3
+  player save/restore regions. Fixed in the verifier.
+
+Caveats: this checks the lift against the code, not the code against the running game. Random and directed states can be unreachable
+ones. Display calls are compared by arguments only; the digits `number_text` writes and the `outside_playfield` write are not
+compared. Some automatic hooks are display-side code (section 4.4 item 1): they verify, but that says nothing about their meaning.
 
 ## 6. Open items
 
-* Annotate EP2-EP13 hooks (main-loop fragments) and names; a pattern search for the EP1 hook shapes (timer decrement blocks,
-  flipper-press latch, drain loop) would find most of them.
+* Name EP2-EP13 state and hooks (the automatic hooks give entry/stop and a shape label only). Reproduce EP1's end-of-ball
+  split (section 4.1 differs at the cut points).
+* EP9 h29c6 (port and segment writes) and EP8 cs:3613 (`rep movs` into DS) need an op or an engine-side implementation.
 * Trace `message.mode` (the effect byte, ds:0B3A) and the text-routine positions to place messages exactly.
 * Runtime check in DOSBox-X: break on cs:1E6A (dispatch) and cs:19C1 (kicker) and compare with `verify_ir.py` traces.
 * EP8's layered toys (lamp overlays switched by rules) need its rules lifted to decide what is solid when.

@@ -28,9 +28,22 @@ public enum EngineAssets {
         return (data, npy.data)
     }
 
-    public static func makeEngine(dataRoot: URL, table: Int) throws -> ClassicEngine {
+    /// The classic engine for `table`. With `rules` (default) the table's lifted rules
+    /// (rules.json + the user's EPn.EXE) are attached, inactive (`rulesMode = .off`) until a
+    /// scenario or `ClassicEngine.startGame` enables them; if they cannot be loaded the engine runs
+    /// physics only and `rulesLoadError` says why.
+    public static func makeEngine(dataRoot: URL, table: Int, rules: Bool = true, originalDir: URL? = nil) throws -> ClassicEngine {
         let (d, buf) = try load(dataRoot: dataRoot, table: table)
-        return try ClassicEngine(data: d, startBuffer: buf)
+        let e = try ClassicEngine(data: d, startBuffer: buf)
+        if rules {
+            do {
+                let r = try RulesRuntime.load(dataRoot: dataRoot, table: table, originalDir: originalDir)
+                r.attach(to: e, mode: .off)
+            } catch {
+                e.rulesLoadError = String(describing: error)
+            }
+        }
+        return e
     }
 }
 
@@ -52,6 +65,7 @@ public enum EngineAssetError: Error, CustomStringConvertible {
 public struct Scenario: Sendable {
     public struct Ball: Sendable, Equatable {
         public var x: Int, y: Int, xf: Int, yf: Int, vx: Int, vy: Int, layer: Int
+        public var active: Int = 1   // "active" in ball / balls entries (harness default 1; EP3 captive ball, EP8 no ball)
     }
     public var table: Int
     public var frames: Int
@@ -71,6 +85,13 @@ public struct Scenario: Sendable {
     public var onDrain: String
     /// "physics" (default, no sensor dispatch), "rules" or "full" (sensor dispatch on).
     public var mode: String
+    /// Port extension for rules tests: raw data-segment writes applied after the rules boot,
+    /// `"ds_pokes": [[offset, value, width], ...]` (width 1, 2 or 4; offsets as in rules.json).
+    public var dsPokes: [(Int, Int, Int)] = []
+    /// Port extension: game options for the rules boot (`"players"`, `"balls"`); the harness's
+    /// defaults are 1 player and 3 balls.
+    public var players: Int?
+    public var ballsPerGame: Int?
 
     /// engine.json / export names; the trace schema's names are accepted as aliases.
     public static let paramNames = ["rest_div_x", "rest_div_y", "kicker", "flip_top_x", "flip_top_y",
@@ -94,7 +115,7 @@ public struct Scenario: Sendable {
             throw ScenarioError.invalid("'ball' needs at least x and y")
         }
         let ball = Ball(x: x, y: y, xf: int(b["xf"]) ?? 0, yf: int(b["yf"]) ?? 0,
-                        vx: int(b["vx"]) ?? 0, vy: int(b["vy"]) ?? 0, layer: int(b["layer"]) ?? 0)
+                        vx: int(b["vx"]) ?? 0, vy: int(b["vy"]) ?? 0, layer: int(b["layer"]) ?? 0, active: int(b["active"]) ?? 1)
         let inputs = (root["inputs"] as? [Any])?.map { int($0) ?? 0 } ?? []
         let frames = int(root["frames"]) ?? inputs.count
         guard frames >= 0 else { throw ScenarioError.invalid("'frames' must be >= 0") }
@@ -135,11 +156,19 @@ public struct Scenario: Sendable {
         var sc = Scenario(table: table, frames: frames, ball: ball, inputs: inputs, paramOverrides: overrides,
                           gravityPhase: int(root["gravity_phase"]), flipperAngles: angles,
                           name: root["name"] as? String, extras: extras, onDrain: onDrain, mode: mode)
+        for p in root["ds_pokes"] as? [[Any]] ?? [] {
+            guard p.count >= 2, let a = int(p[0]), let v = int(p[1]) else { throw ScenarioError.invalid("bad ds_pokes entry") }
+            let w = p.count > 2 ? (int(p[2]) ?? 1) : 1
+            guard [1, 2, 4].contains(w), (0..<0x10000).contains(a) else { throw ScenarioError.invalid("bad ds_pokes entry") }
+            sc.dsPokes.append((a, v, w))
+        }
+        sc.players = int(root["players"])
+        sc.ballsPerGame = int(root["balls_per_game"])
         if let bs = root["balls"] as? [[String: Any]] {
             sc.extraBalls = try bs.prefix(4).map { b in
                 guard let x = int(b["x"]), let y = int(b["y"]) else { throw ScenarioError.invalid("'balls' entries need x and y") }
                 return Ball(x: x, y: y, xf: int(b["xf"]) ?? 0, yf: int(b["yf"]) ?? 0,
-                            vx: int(b["vx"]) ?? 0, vy: int(b["vy"]) ?? 0, layer: int(b["layer"]) ?? 0)
+                            vx: int(b["vx"]) ?? 0, vy: int(b["vy"]) ?? 0, layer: int(b["layer"]) ?? 0, active: int(b["active"]) ?? 1)
             }
         }
         return sc
@@ -163,6 +192,14 @@ public struct Scenario: Sendable {
     /// Engine state at frame 0: flippers at rest (or as given), ball 0 as given.
     public func apply(to e: ClassicEngine) {
         e.resetToRest()
+        // The rules boot state (the original's init, with the harness's options) comes before the
+        // scenario's own state, as in the harness (boot, then reset_play_state and pokes).
+        if let r = e.rules {
+            r.options = .harness
+            if let p = players { r.options.players = p }
+            if let b = ballsPerGame { r.options.ballsPerGame = b }
+            r.boot()
+        }
         if let a = flipperAngles {
             for (g, angle) in a.enumerated() where e.groups.indices.contains(g) { e.setFlipperAngle(group: g, angle: angle) }
             for g in e.groups.indices { e.groups[g].moving = false }
@@ -175,6 +212,7 @@ public struct Scenario: Sendable {
                                    vx: Int16(truncatingIfNeeded: b.vx), vy: Int16(truncatingIfNeeded: b.vy),
                                    accx: Int16(truncatingIfNeeded: b.xf), accy: Int16(truncatingIfNeeded: b.yf),
                                    layer: UInt8(truncatingIfNeeded: b.layer))
+            e.balls[i].active = UInt16(truncatingIfNeeded: b.active)
         }
         if let v = extras["nudge_timer"] { e.nudgeTimer = UInt8(truncatingIfNeeded: v) }
         if let v = extras["tilt_meter"] { e.tiltMeter = UInt8(truncatingIfNeeded: v) }
@@ -191,6 +229,11 @@ public struct Scenario: Sendable {
         // The harness's "physics" mode runs no sensor dispatch and skips ball_lost_fade.
         e.sensorsEnabled = mode != "physics"
         e.ballLostResets = mode == "full"
+        // Rules (if attached): the harness's mode; ds_pokes last, like the harness's pokes.
+        if let r = e.rules {
+            e.rulesMode = mode == "rules" ? .rules : (mode == "full" ? .full : .off)
+            for (a, v, w) in dsPokes { r.machine.write(a, w, Int64(v)) }
+        }
     }
 }
 
@@ -292,6 +335,9 @@ public enum TraceRunner {
         var out = ""
         out.reserveCapacity(sc.frames * 3 * 200)
         var guardTrips = e.loopGuardTrips, faults = e.divideFaults
+        var dsShadow = e.rules?.machine.initialDS ?? []
+        if state { e.rules?.traceCalls = true; e.rules?.clearCallLog(); e.rules?.machine.coverage = [] }
+        var covShadow = Set<Int>()
         e.onStep = { f, s, r in
             let b = e.balls[0]
             let mine = r.log.filter { $0.ball == 0 }
@@ -312,6 +358,33 @@ public enum TraceRunner {
                 // hangs (push-out loop without a cap) or raises a divide error in such a step.
                 if e.loopGuardTrips != guardTrips { line += ",\"loop_guard\":\(e.loopGuardTrips - guardTrips)" }
                 if e.divideFaults != faults { line += ",\"divide_faults\":\(e.divideFaults - faults)" }
+                if state, s == e.data.timing.stepsPerFrame - 1, let r = e.rules, e.rulesMode != .off {
+                    // Rules data segment after the frame, as changes since the previous frame's dump
+                    // (the first dump is relative to the EXE's data segment): [[offset, byte], ...].
+                    var changes: [String] = []
+                    let now = r.machine.snapshot()
+                    if now != dsShadow {
+                        // compare 8 bytes at a time, then the bytes of differing words
+                        now.withUnsafeBytes { nb in
+                            dsShadow.withUnsafeBytes { ob in
+                                let n8 = nb.count / 8
+                                for i in 0..<n8 where nb.loadUnaligned(fromByteOffset: 8 * i, as: UInt64.self)
+                                    != ob.loadUnaligned(fromByteOffset: 8 * i, as: UInt64.self) {
+                                    for a in (8 * i)..<(8 * i + 8) where nb[a] != ob[a] { changes.append("[\(a),\(nb[a])]") }
+                                }
+                                for a in (8 * n8)..<nb.count where nb[a] != ob[a] { changes.append("[\(a),\(nb[a])]") }
+                            }
+                        }
+                        dsShadow = now
+                    }
+                    line += ",\"ds\":[\(changes.joined(separator: ","))]"
+                    line += ",\"sfx\":\(r.sfxCalls),\"msg\":\(r.messageCalls)"
+                    r.clearCallLog()
+                    let cov = r.machine.coverage ?? []
+                    let fresh = cov.subtracting(covShadow).map { "\"\(r.program.blocks[$0].label)\"" }
+                    covShadow = cov
+                    line += ",\"blk\":[\(fresh.sorted().joined(separator: ","))]"
+                }
                 if state {
                     let bs = e.balls.map { "[\($0.active),\($0.x),\($0.y),\($0.accx),\($0.accy),\($0.vx),\($0.vy),\($0.layer)]" }
                     line += ",\"balls\":[\(bs.joined(separator: ","))],\"tilted\":\(e.tilted ? 1 : 0),\"tilt_meter\":\(e.tiltMeter),"

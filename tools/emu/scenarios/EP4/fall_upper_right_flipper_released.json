@@ -1,0 +1,15 @@
+{
+ "name": "fall_upper_right_flipper_released",
+ "table": 4,
+ "frames": 150,
+ "ball": {
+  "x": 256,
+  "y": 83,
+  "xf": 0,
+  "yf": 0,
+  "vx": -14,
+  "vy": 349
+ },
+ "description": "Ball aimed with v=(-14,349) from (256,83) onto the resting upper_right flipper (outline 3), no input: first contact frame 1 step 1, k=44.",
+ "inputs": []
+}

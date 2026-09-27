@@ -1,0 +1,16 @@
+{
+ "name": "gate_one_way_hit",
+ "table": 9,
+ "frames": 120,
+ "ball": {
+  "x": 211,
+  "y": 32,
+  "xf": 0,
+  "yf": 0,
+  "vx": 298,
+  "vy": -28
+ },
+ "description": "Ball at (211,32) v=(298,-28) (x <= 0xd7, so frame 0 closes the one-way gate cs:0550..0577 -> cs:4091: 14 pixels from ds:04FE set to FA); first response frame 1 step 1 k=43 has 4 probes on the gate pixels. Physics mode needs the table override in tools/emu/tables/EP9.json (gate range).",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

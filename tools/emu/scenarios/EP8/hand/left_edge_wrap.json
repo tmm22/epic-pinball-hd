@@ -1,0 +1,16 @@
+{
+ "name": "left_edge_wrap",
+ "table": 8,
+ "frames": 30,
+ "ball": {
+  "x": 5,
+  "y": 146,
+  "xf": 0,
+  "yf": 0,
+  "vx": -400,
+  "vy": 0
+ },
+ "description": "Ball at (5,146) v=(-400,0) in open space at the left edge: after the x move, cs:17A8 compares x UNSIGNED with 0x130, so a negative x becomes 304 before the (signed) x < 1 clamp at cs:17B6 is reached: the ball wraps to the right edge; x over the first 12 steps: [2, 304, 301, 298, 297, 297, 296, 296, 296, 296, 296, 295].",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

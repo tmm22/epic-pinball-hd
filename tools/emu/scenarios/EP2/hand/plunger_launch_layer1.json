@@ -1,0 +1,12 @@
+{
+ "name": "plunger_launch_layer1",
+ "table": 2,
+ "frames": 240,
+ "ball": {
+  "x": 284,
+  "y": 338,
+  "layer": 1
+ },
+ "description": "Ball at the serve position on layer 1, as the game serves it (cs:0AFB) and as ball_slots_initial slot 0 starts; plunger held 60 frames. EP2 lane code has no layer test (cs:0BB4..0BC9).",
+ "inputs": [4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]
+}

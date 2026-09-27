@@ -1,0 +1,16 @@
+{
+ "name": "x_rules_saucer_c4",
+ "table": 11,
+ "frames": 200,
+ "ball": {
+  "x": 186,
+  "y": 86,
+  "xf": 0,
+  "yf": 0,
+  "vx": 143,
+  "vy": -93
+ },
+ "mode": "rules",
+ "description": "rules mode: ball (186,86) v=(143,-93) into the C4 saucer (handler cs:2295) at frame 5; the countdown calls the gate draw cs:3FE7 (1x: collision-buffer writes at offsets from the cs:3FB9 word table) and later ejects the ball.",
+ "inputs": []
+}

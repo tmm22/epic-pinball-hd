@@ -1,0 +1,19 @@
+{
+ "name": "tilted_bumper_hit",
+ "table": 7,
+ "frames": 150,
+ "ball": {
+  "x": 235,
+  "y": 88,
+  "xf": 0,
+  "yf": 0,
+  "vx": -300,
+  "vy": 0
+ },
+ "pokes": {
+  "tilted": 1
+ },
+ "description": "bumper_hit start with tilted=1 poked and both flipper keys held every frame: the flippers must stay at rest (angles seen [9]); first response frame 0 step 1 k=25 kick=0 (engine.json kicker.tilt_disables decides whether the kick happens).",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": [3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3]
+}

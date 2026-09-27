@@ -13,6 +13,11 @@ enum TraceMode {
         }
         if let gp = o.gravityPhase { sc.gravityPhase = gp }
         let engine = try EngineAssets.makeEngine(dataRoot: dataRoot, table: sc.table)
+        // A rules/full scenario without rules would silently test only the physics-only sensors.
+        if let err = engine.rulesLoadError {
+            warn("rules not loaded (\(sc.mode) mode runs the engine.json sensors only): \(err)")
+            if sc.mode != "physics" && o.requireRules { throw ScenarioError.invalid("rules required: \(err)") }
+        }
 
         // Field names: the harness track's schema if present, else the contract defaults.
         let schemaURL = o.traceSchema.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
@@ -27,6 +32,10 @@ enum TraceMode {
         }
 
         let text = TraceRunner.run(sc, engine: engine, names: names, extra: !o.noExtra, state: o.traceState)
+        if let r = engine.rules {
+            for w in r.warnings { warn("rules: \(w)") }
+            for f in Set(r.machine.faults) { warn("rules fault: \(f)") }
+        }
         if let out = o.traceOut {
             let url = URL(fileURLWithPath: (out as NSString).expandingTildeInPath).standardizedFileURL
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

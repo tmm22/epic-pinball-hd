@@ -31,6 +31,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import epexe  # noqa: E402
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "emu"))
+try:
+    import discover  # tools/emu/discover.py: per-table code/variable search shared with the emulator harness
+except ImportError:  # (needs capstone)
+    discover = None
 
 try:
     import capstone
@@ -113,6 +118,17 @@ def export_table(n):
     sj = json.load(open(sp_path)) if os.path.exists(sp_path) else None
     out = {"format": FORMAT, "version": VERSION, "table": n}
     forbidden = set()   # physics state a sensor handler may not touch (handler rejected if it does)
+    # The emulator harness's per-table search (tools/emu/discover.py) covers structural variants the
+    # EP1-shaped patterns below miss (EP5/EP6 serve, EP8 launch, kicker call shapes...).  It is only
+    # consulted where a pattern here falls back, so tables whose patterns match are unchanged.
+    emu = {}
+    if discover is not None:
+        try:
+            emu, _ = discover.discover(n, x.path)
+        except Exception as e:  # noqa: BLE001
+            emu = {}
+            print(f"EP{n}: tools/emu/discover.py failed ({e}); EP1 fallbacks stay", file=sys.stderr)
+    emu_ds = emu.get("ds_vars", {})
     out["source"] = {
         "exe": f"EP{n}.EXE",
         "sha1": hashlib.sha1(x.data).hexdigest(),
@@ -179,6 +195,21 @@ def export_table(n):
                       "extra_initial": x.dsw(extra_var) if extra_var is not None else 0,
                       "note": "per frame, per active ball: if vy <= cutoff: vy += params.gravity + extra; "
                               "extra (if present) is decremented once per frame while nonzero"}
+    if m:
+        # the whole add sequence: mov ax,[g]; {add|sub ax,[V]}*; add [di+vy],ax; [cmp di,SLOT; jne; add word [di+vy],K]
+        a = m[1] + len(m[0].group(0))
+        terms = []
+        while x.code[a:a + 2] in (b"\x03\x06", b"\x2b\x06"):
+            v = u16(x.code, a + 2)
+            terms.append({"op": "add" if x.code[a] == 0x03 else "sub", "var": hex(v), "initial": x.dsw(v)})
+            a += 4
+        out["gravity"]["terms"] = terms
+        out["gravity"]["terms_note"] = ("vy += params.gravity, then each term in order (add/sub the DS word); EP1: one add "
+                                        "(extra). Only the extra term is decremented per frame by the engine")
+        sb = re.match(rb"\x01\x85..\x83\xff(.)\x75.\x83\x85..(.)", x.code[a:a + 16], re.S)
+        if sb:
+            out["gravity"]["slot_bonus"] = {"slot": sb.group(1)[0] // 2, "add": struct.unpack("<b", sb.group(2))[0],
+                                            "note": "after the add, this ball slot gets vy += add (same cutoff test)"}
 
     # ---- probe ring, normals, push-out, LUTs: from collision.json (itself parsed from the EXE)
     ring = cj["ball"]["ring_offsets"]
@@ -219,11 +250,28 @@ def export_table(n):
         if cm:
             kcool = cm.group(1)[0]
             x.found["kicker_hit"] = hex(kip)
+    cool_before_tilt = False
+    if kcool is None and emu.get("kicker_hit") is not None and "kicker_cooldown" in emu_ds:
+        # other call shapes (EP5: jne +7; EP2: x/y window before the call): the harness's search
+        cool_var, kip = emu_ds["kicker_cooldown"], emu["kicker_hit"]
+        forbidden.add(cool_var)
+        body = x.code[kip:kip + 0x60]
+        cm = re.search(rb"\xc6\x06" + re.escape(struct.pack("<H", cool_var)) + rb"(.)", body, re.S)
+        tm = re.search(rb"\x80\x3e..\x01(?:\x75\x03[\xe9\xeb]|\x74)", body[:0x20], re.S)
+        if cm:
+            kcool = cm.group(1)[0]
+            x.found["kicker_hit"] = hex(kip)
+            tilt_in_kicker = tm is not None
+            cool_before_tilt = tm is not None and cm.start() < tm.start()
     if kcool is None:
         kcool = x.fallback("kicker.cooldown_frames", EP1_DEFAULTS["kicker_cooldown"])
     out["kicker"] = {"cooldown_frames": kcool, "tilt_disables": True if tilt_in_kicker is None else tilt_in_kicker,
                      "note": "any probe on an 'active' index calls the kicker when cooldown==0: kick=params.kicker, "
                              "cooldown=N (decremented per frame). Not while tilted."}
+    out["kicker"].update(kicker_path(x, emu))
+    out["kicker"]["cooldown_set_when_tilted"] = cool_before_tilt
+    if emu_ds.get("kicker_cooldown") is not None and emu_ds.get("kicker_cooldown") == emu_ds.get("event_lockout"):
+        out["kicker"]["cooldown_is_sensor_lockout"] = True
 
     # ---- collision_response constants (cs:1AEC..1B47): side/tip kick index ranges
     m = x.first(rb"\x83\xfb(.)\x77.\x83\xfb(.)\x72.\x83\xfb.\x77.\x83\xc3.\xbb(..)\xeb.\x90\x81\xfb(..)\x72.\xbb(..)",
@@ -275,6 +323,24 @@ def export_table(n):
                 "left: vx+=fx[a]*p3, right: vx-=fx[a]*p3; vy-=fy[a]*p4 (a = that flipper's angle)",
     }
     out["nudge_impulse"] = nudge_imp
+    # y gates on the flipper paths (EP4, EP8-13; not EP1-3, EP5-7), right after the contact direction store:
+    #   cmp byte [flipper_contact],0; je PLAIN; cmp word [di+y],300; jb PLAIN   (side/tip kick path)
+    #   ... cmp byte [flipper_contact],0; jne; ...; cmp word [di+y],310; jb     (top kick path)
+    # Above the gate (u16 y < side_min_y) a flipper contact gets the plain push-out; the first response then takes the
+    # top kick, or with y < top_min_y the upper-flipper kick (tools/engine_overrides: flipper_kick.upper_kick).
+    gates = []
+    if emu.get("collision_response_dir_stored") is not None and "flipper_contact" in emu_ds:
+        ca = emu["collision_response_dir_stored"]
+        gp = (rb"\x80\x3e" + re.escape(struct.pack("<H", emu_ds["flipper_contact"])) + rb"\x00(?:\x74.|\x75\x03\xe9..)\x81\xbd"
+              + re.escape(struct.pack("<H", emu_ds["ball_y"])) + rb"(..)\x72")
+        gates = [(ca + mm.start(), u16(mm.group(1))) for mm in re.finditer(gp, x.code[ca:ca + 0x120], re.S)]
+    out["flipper_kick"]["side_min_y"] = gates[0][1] if gates else None
+    out["flipper_kick"]["top_min_y"] = gates[1][1] if len(gates) > 1 else None
+    out["flipper_kick"]["gate_note"] = ("if not null: a flipper contact with (u16) ball y < side_min_y takes the plain "
+                                        "one-pixel push-out instead of the side/tip kick; on the first response it still "
+                                        "takes the top kick, or with y < top_min_y the upper_kick (tools/engine_overrides)")
+    for a_, v_ in gates:
+        x.found[f"flipper_gate_{v_}"] = hex(a_)
 
     # ---- flippers: outlines from collision.json + variables parsed from flipper_update (cs:3CDD)
     key_l = x.first(rb"\x3c\x2a\x75.\x2e\xc6\x06(..)\x01", "key_lflip")
@@ -412,6 +478,29 @@ def export_table(n):
     plunger.update({"lane_min_x": lane["min_x"], "lane_min_y": lane["min_y"], "zero_vx_in_lane_when_released": True,
                     "note": "only when ball 0 active, level 0, x>=lane_min_x, y>=lane_min_y (unsigned): held -> "
                             "if charge<=max: charge+=step; released -> vx=0; if charge: vy-=charge, y-=1, charge=0"})
+    # fallbacks -> the harness's search (EP5/EP6 serve at (297,346) with vx=2 and their drain loop; EP8 has no lane)
+    if "serve" in x.fallbacks and emu.get("serve"):
+        sv = emu["serve"]
+        serve = {"x": sv["x"], "y": sv["y"], "delay": sv["delay"]}
+        x.fallbacks.remove("serve")
+        x.found["serve"] = "tools/emu/discover.py"
+    if emu.get("serve"):
+        serve["vx"] = emu["serve"].get("vx", 0)
+        serve["vy"] = emu["serve"].get("vy", 0)
+    elif emu:
+        serve["present"] = False
+        serve["note"] = "no serve code after the drain loop (EP1 values kept so the fields stay integers)"
+    if "drain_y" in x.fallbacks and emu.get("drain_y"):
+        drain_y = emu["drain_y"]
+        x.fallbacks.remove("drain_y")
+        x.found["drain"] = "tools/emu/discover.py"
+    epl = emu.get("plunger") or {}
+    plunger["kind"] = epl.get("kind", "charge")
+    if epl.get("kind") == "launch_flag":
+        plunger["note"] = ("no plunger lane: while no ball is active, holding the plunger sets the launch flag "
+                           f"(ds:{emu_ds.get('plunger_charge', 0):04x}) to max; on release the ball is placed per 'launch'. "
+                           "step/cmp/lane fields are EP1 fallbacks")
+        plunger["launch"] = emu.get("launch")
     out["plunger"] = plunger
     out["serve"] = serve
     out["drain_y"] = drain_y
@@ -465,6 +554,14 @@ def export_table(n):
     # ball_pixel_scan (EP1 cs:16D6): cmp al,0FEh; je -> this index fires even while locked out
     fm = x.first(rb"\x3c(.)\x74\x05\x80\xfc\x00", "sensor_always")
     out["sensors"]["always_fires_value"] = fm[0].group(1)[0] if fm else x.fallback("sensors.always_fires_value", 0xFE)
+    if fm:
+        out["sensors"]["always_fires"] = fm[0].group(1)[0]
+    elif emu.get("ball_pixel_scan") is not None:
+        sc = emu["ball_pixel_scan"]
+        if re.search(rb"\x80\xfc\x00\x75", x.code[sc:sc + 0x100]):
+            out["sensors"]["always_fires"] = None
+            out["sensors"]["always_fires_note"] = ("no value bypasses the lockout in this table's scan (always_fires_value is "
+                                                   "an EP1 fallback, do not use it)")
 
     # ---- initial contents of the 5 ball slots in the DS image (inactive slots keep stale values)
     arr = {k: int(v, 16) for k, v in out["sensors"].get("vars", {}).items() if k.endswith(".0")}
@@ -484,7 +581,167 @@ def export_table(n):
                              "once per frame in the main loop; its phase relative to the 3 steps is load dependent."}
     out["found_at"] = x.found
     out["fallbacks"] = x.fallbacks
+    apply_overrides(n, out, x)
     return out
+
+
+# ---- tools/engine_overrides/EPn.json: hand-verified additions (code facts and DS addresses only)
+OVERRIDES_DIR = os.path.join(ROOT, "tools", "engine_overrides")
+
+
+def _set_path(d, path, value):
+    keys = path.split(".")
+    for k in keys[:-1]:
+        if not isinstance(d.get(k), dict):
+            d[k] = {}
+        d = d[k]
+    d[keys[-1]] = value
+
+
+def _merge(dst, src, path, applied, replaced):
+    for k, v in src.items():
+        p = f"{path}{k}"
+        if isinstance(v, dict) and isinstance(dst.get(k), dict):
+            _merge(dst[k], v, p + ".", applied, replaced)
+            continue
+        if k in dst and dst[k] != v:
+            replaced.append(p)
+        dst[k] = v
+        applied.append(p)
+
+
+def _read_ds_words(x, off, words, signed=True):
+    return [x.dsw(off + 2 * i, signed=signed) for i in range(words)]
+
+
+def _read_pixel_list(x, off):
+    """`u16 count, then count u16 offsets` in the EXE's data image (gate pixel lists)."""
+    count = x.dsw(off, signed=False)
+    if not 0 < count < 4096:
+        raise ValueError(f"pixel list at ds:{off:04x} has count {count}")
+    return [x.dsw(off + 2 + 2 * i, signed=False) for i in range(count)]
+
+
+def _resolve_tables(o, x):
+    """Replace table references by the words they point at in the user's EXE:
+    {"ds": "0x..", "words": n, "signed": b} -> list; upper-kick sides with vx_sub_table/vy_sub_table."""
+    if isinstance(o, list):
+        return [_resolve_tables(v, x) for v in o]
+    if not isinstance(o, dict):
+        return o
+    if set(o) >= {"ds", "words"} and isinstance(o.get("ds"), str) and len(o) <= 4:
+        return _read_ds_words(x, int(o["ds"], 16), o["words"], o.get("signed", True))
+    out = {k: _resolve_tables(v, x) for k, v in o.items()}
+    for key, dst in (("vx_sub_table", "vx_sub"), ("vy_sub_table", "vy_sub")):
+        if isinstance(out.get(key), str) and "table_words" in out:
+            out[dst] = _read_ds_words(x, int(out[key], 16), out["table_words"])
+    return out
+
+
+def _normalise(out, x):
+    """One engine.json shape for what the two override styles describe."""
+    fk = out.get("flipper_kick", {})
+    uk = fk.get("upper_kick")
+    if isinstance(uk, dict) and "right" not in uk and "vx_table" in uk:
+        # EP11-13 style (one kick, the right-hand group) -> the EP4 shape
+        side = {"angle_group": uk["angle_group"], "dx": uk["dx"], "dy": uk["dy"],
+                "vx_sub": uk["vx_table"], "vy_sub": uk["vy_table"]}
+        fk["upper_kick"] = {"split_x": None, "vy_zero_if_positive": uk.get("vy_positive_to_zero", True),
+                            "right": side, "left": None, "code": uk.get("code"), "reachable": uk.get("reachable")}
+    for g in out.get("gates", []) or []:
+        px = g.get("pixels")
+        if isinstance(px, dict) and "list" in px:
+            g["pixels"] = dict(px, offsets=_read_pixel_list(x, int(px["list"], 16)))
+        elif isinstance(px, list):
+            g["pixels"] = [dict(p, offsets=_read_pixel_list(x, int(p["list"], 16))) for p in px]
+    # sensors.lockout_is_kicker_cooldown (EP6) is the sensor-side name of kicker.cooldown_is_sensor_lockout
+    if out.get("sensors", {}).get("lockout_is_kicker_cooldown"):
+        out["kicker"]["cooldown_is_sensor_lockout"] = True
+    if "always_fires" in out.get("sensors", {}) and "sensors.always_fires_value" in out["fallbacks"]:
+        out["fallbacks"].remove("sensors.always_fires_value")
+        out["sensors"]["always_fires_value_note"] = "EP1 fallback; superseded by always_fires (null = no bypass)"
+
+
+def apply_overrides(n, out, x):
+    path = os.path.join(OVERRIDES_DIR, f"EP{n}.json")
+    if not os.path.exists(path):
+        return
+    ov = json.load(open(path))
+    applied, replaced = [], []
+    if isinstance(ov.get("patch"), dict):
+        _merge(out, _resolve_tables(ov["patch"], x), "", applied, replaced)
+    for k, v in (ov.get("set") or {}).items():
+        cur = out
+        for part in k.split(".")[:-1]:
+            cur = cur.get(part, {}) if isinstance(cur, dict) else {}
+        last = k.split(".")[-1]
+        if isinstance(cur, dict) and last in cur and cur[last] != v:
+            replaced.append(k)
+        _set_path(out, k, _resolve_tables(v, x))
+        applied.append(k)
+    _normalise(out, x)
+    out["overrides"] = {"file": os.path.relpath(path, ROOT), "applied": applied, "replaced": replaced,
+                        "note": "hand-verified additions (cs:ip evidence in the override file); tables resolved from the EXE"}
+
+
+def kicker_path(x, emu):
+    """The wall loop's active-surface branch (EP1 cs:18A1..18AB), read from the code:
+    EP1: `cmp byte [cool],0; jne APPEND; call kicker_hit` then falls into APPEND (the probe is a contact
+    whether or not the kicker fired).  EP2 differs: `cmp es:[bx],D0h; ja SKIP` (D1/D2 no contact),
+    cooldown set -> APPEND (plain wall contact), then an x/y window (outside -> SKIP, no contact), and
+    after the call `jmp SKIP`: a probe that fires the kicker is NOT added to the hit list.
+    Returns additive engine.json keys (EP1 values: contact_on_fire true, cooling_contact true, no window)."""
+    ps, kip, cool = emu.get("physics_step"), emu.get("kicker_hit"), emu.get("ds_vars", {}).get("kicker_cooldown")
+    if ps is None or kip is None or cool is None:
+        return {}
+    code = x.code
+    app = re.search(rb"\xd1\xee\x53\x8b\x1e", code[ps:ps + 0x400])
+    skp = re.search(rb"\x5b\x83\xee\x02\x75", code[ps:ps + 0x400])
+    call = None
+    for mm in re.finditer(rb"\xe8", code[ps:ps + 0x400]):
+        a = ps + mm.start()
+        if (a + 3 + s16(code, a + 1)) & 0xFFFF == kip:
+            call = a
+            break
+    if not (app and skp and call):
+        return {}
+    append, skip = ps + app.start(), ps + skp.start()
+    head = re.search(rb"(\x26\x80\x3f(.)\x77(.))?\x80\x3e" + re.escape(struct.pack("<H", cool)) + rb"\x00\x75(.)",
+                     code[call - 0x30:call], re.S)
+    if not head:
+        return {}
+    h0 = call - 0x30 + head.start()
+    jne_at = call - 0x30 + head.start(4) - 1
+    target = (jne_at + 2 + struct.unpack("<b", head.group(4))[0]) & 0xFFFF
+    res = {"cooling_contact": target == append, "path_ip": hex(h0)}
+    res["active_max"] = head.group(2)[0] if head.group(1) else None
+    window = []
+    a = call - 0x30 + head.end()
+    names = {emu["ds_vars"].get("ball_x"): "x", emu["ds_vars"].get("ball_y"): "y"}
+    while a < call:
+        mm = re.match(rb"(?:\x81\xbd(..)(..)|\x83\xbd(..)(.))([\x77\x72])", code[a:a + 8], re.S)
+        if not mm:
+            break
+        var = u16(mm.group(1) or mm.group(3))
+        val = u16(mm.group(2)) if mm.group(2) else struct.unpack("<b", mm.group(4))[0]
+        window.append({"coord": names.get(var, hex(var)), "no_contact_if": "ja" if mm.group(5) == b"\x77" else "jb",
+                       "value": val})
+        a += len(mm.group(0)) + 1
+    res["window"] = window
+    after = call + 3
+    while code[after:after + 2] == b"\xc7\x06":        # e.g. EP5: mov word [sfx],0 after the call
+        after += 6
+    if code[after] == 0xEB:
+        dest = (after + 2 + struct.unpack("<b", code[after + 1:after + 2])[0]) & 0xFFFF
+    elif code[after] == 0xE9:
+        dest = (after + 3 + s16(code, after + 1)) & 0xFFFF
+    else:
+        dest = after
+    res["contact_on_fire"] = dest == append
+    res["path_note"] = ("active probe: if active_max and v > active_max -> no contact; if cooldown != 0 -> contact "
+                        "(cooling_contact) else no contact; window tests (coord of the ball's top-left, unsigned) -> "
+                        "no contact; else kicker fires, and the probe counts as a contact only if contact_on_fire")
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -511,8 +768,9 @@ def sensors(x, cj, extra_var, p_ds, forbidden=()):
         names[extra_var] = "extra_gravity"
     # gravity_and_objects (EP1 cs:11C1): mov ax,[di+X]; mov bx,[di+Y]; mov cl,[di+L]; mov [cur],cl;
     #   mov [ox],ax; mov [oy],bx; mov cx,[di+VX]; mov [ovx],cx; mov cx,[di+VY]; mov [ovy],cx
-    m = x.first(rb"\x8b\x85(..)\x8b\x9d(..)\x8a\x8d(..)\x88\x0e(..)\xa3(..)\x89\x1e(..)\x8b\x8d(..)\x89\x0e(..)"
-                rb"\x8b\x8d(..)\x89\x0e(..)", "obj_copy")
+    # (EP9-13 copy the ball's own sensor lockout first: mov cl,[di+L]; mov [lock],cl)
+    m = x.first(rb"\x8b\x85(..)\x8b\x9d(..)(?:\x8a\x8d..\x88\x0e..)?\x8a\x8d(..)\x88\x0e(..)\xa3(..)\x89\x1e(..)"
+                rb"\x8b\x8d(..)\x89\x0e(..)\x8b\x8d(..)\x89\x0e(..)", "obj_copy")
     arrays = {}
     if m:
         g = [u16(v) for v in m[0].groups()]
@@ -525,7 +783,7 @@ def sensors(x, cj, extra_var, p_ds, forbidden=()):
     ec = x.first(rb"\x80\x3e(..)\x00\x75.\xe8(..)\x8a\x26", "event_cooldown")
     if ec:
         names[u16(ec[0].group(1))] = "event_cooldown"
-    am = x.first(rb"\x83\xbd(..)\x00\x74.\x81\xbd(..)\x40\x01", "active_array")
+    am = x.first(rb"\x83\xbd(..)\x00(?:\x74.|\x75\x03\xe9..)\x81\xbd(..)\x40\x01", "active_array")
     if am:
         arrays["ball_active"] = u16(am[0].group(1))
     for arr, base in arrays.items():

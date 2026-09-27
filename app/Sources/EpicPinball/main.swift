@@ -43,9 +43,21 @@ do {
     fail("\(error)")
 }
 
+if let n = options.autoplay, options.snapshot == nil {
+    let report = AutoPlay.run(engine: engine, frames: n, options: options.rulesOptions)
+    let enc = JSONEncoder()
+    enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+    let data = (try? enc.encode(report)) ?? Data()
+    if let p = options.autoplayJSON {
+        do { try data.write(to: URL(fileURLWithPath: (p as NSString).expandingTildeInPath)) } catch { fail("cannot write \(p): \(error)") }
+    }
+    FileHandle.standardOutput.write(data + Data("\n".utf8))
+    exit(report.loopGuardTrips == 0 && report.ruleFaults.isEmpty ? 0 : 3)
+}
+
 if options.snapshot != nil {
     do {
-        try SnapshotMode.run(options: options, assets: assets, engine: engine)
+        try MainActor.assumeIsolated { try SnapshotMode.run(options: options, assets: assets, engine: engine, dataRoot: dataRoot) }
         exit(0)
     } catch {
         fail("snapshot failed: \(error)")
@@ -53,7 +65,7 @@ if options.snapshot != nil {
 }
 
 let app = NSApplication.shared
-let delegate = AppDelegate(options: options, assets: assets, engine: engine)
+let delegate = MainActor.assumeIsolated { AppDelegate(options: options, assets: assets, engine: engine, dataRoot: dataRoot) }
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()

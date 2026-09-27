@@ -1,0 +1,19 @@
+{
+ "name": "extra_gravity_fall",
+ "table": 9,
+ "frames": 150,
+ "ball": {
+  "x": 94,
+  "y": 326,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0
+ },
+ "pokes": {
+  "extra_gravity": 30
+ },
+ "description": "fall_left_flipper_released with extra_gravity (ds:41BB)=30 poked: per frame the gravity block adds params.gravity + [41BB] - [41B9] (cs:1327) and cs:0545 decrements [41BB]; differs from the plain fall from record 0.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

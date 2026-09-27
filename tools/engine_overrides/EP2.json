@@ -1,0 +1,63 @@
+{
+ "format": "epic-pinball-engine-overrides/1",
+ "table": 2,
+ "exe": "EP2.EXE",
+ "note": "Additive patch for extracted/tables/EP2/engine.json: deep-merge 'patch' into the exporter's output (new keys only; nothing here renames or removes a key). export_engine_data.py does not read this directory yet. Only code addresses (cs:/ds: offsets in EP2's own segments), small engine constants and flags are stored; nothing is copied from the game. Every value is cited in 'evidence' and was checked on the original code with the harness (scenarios in tools/emu/scenarios/EP2/hand/).",
+ "patch": {
+  "serve": {
+   "layer": 1
+  },
+  "plunger": {
+   "lane_layer_test": false
+  },
+  "drain": {
+   "slots": 5,
+   "serve_when_empty": 5,
+   "clear_layer_on_drain": false,
+   "transfer": {
+    "when": "after any slot drains, slot 0 is inactive and exactly one of slots 1, 2 is active",
+    "from_slots": [
+     1,
+     2
+    ],
+    "to_slot": 0,
+    "copies": [
+     "x",
+     "y",
+     "vx",
+     "vy"
+    ],
+    "not_copied": [
+     "accx",
+     "accy",
+     "layer"
+    ],
+    "source_active_after": 0,
+    "rule_var_cleared": "0x0171",
+    "requires_flag_var": null
+   }
+  },
+  "kicker": {
+   "requires_layer0": true,
+   "kick_constant_when_y_at_least": {
+    "y": 200,
+    "kick": 6
+   },
+   "contact_on_fire_applies_when_tilted": true
+  },
+  "sensors": {
+   "sprite_mask": "word",
+   "sprite_mask_note": "a 'sensor' pixel under the ball box fires only if the ball sprite word at the same box position is non-zero: (ball.pixels[i] | ball.pixels[i+1]) != 0, i = row*w + col (i+1 = 210 reads the byte after the sprite copy, ds:63BA). Occluder writes into the copy never change a later test."
+  }
+ },
+ "evidence": {
+  "serve.layer": "cs:0AFB mov byte [ball_layer0 ds:5568],1 after the serve stores cs:0AD8..0AF5 (engine.json ball_slots_initial slot 0 also has layer 1). Harness: hand/serve_layer1_plunge record 0 layer 1. On layer 0 the lane art is wall: the first step pushes the ball 19 px out of the lane (the port does this today).",
+  "plunger.lane_layer_test": "lane guard cs:0BB4..0BC9 tests active, x >= 280, y >= 220 only; EP1 has cmp byte [ball_layer0],0 at cs:0AA4. Harness: hand/plunger_launch_layer1 charges on layer 1.",
+  "drain": "drain loop cs:0A41..0AD6 (di = 10..2, slots 4..0; cx counts empty slots; serve when cx == 5 at cs:0AD3).",
+  "drain.transfer": "cs:0A5D clears the drained slot; cs:0A63 slot0 active -> no transfer (cs:0AB7: if slots 1 and 2 are both inactive, ds:0171 = 0); cs:0A6A..0A78 slot1 active and slot2 inactive -> bx=2; cs:0AAB..0AB2 slot1 inactive and slot2 active -> bx=4; cs:0A7B..0AA0 active[bx]=0, active[0]=1, x/y/vx/vy[0] = [bx]; cs:0AA3 ds:0171 = 0. Harness: hand/multiball_drain_transfer record 0 continues with slot 1's ball.",
+  "kicker.requires_layer0": "kicker_hit cs:1B47 cmp byte [di+ball_layer],0; je; jmp ret (unreachable today: layer 1 has no active colour range, dh = 0 at cs:19CA).",
+  "kicker.kick_constant_when_y_at_least": "kicker_hit cs:1B5D kick_strength = param[2] (ds:557B), then for u16 ball y >= 200 (cs:1B68 cmp [di+y],0C8h; jb) cs:1BD3 mov byte [kick_strength ds:5563],6. Latent in play (param[2] = 6 in EP2); harness: hand/slingshot_kick_const with params.kicker = 3 keeps kick 6.",
+  "kicker.contact_on_fire_applies_when_tilted": "cs:1A2B call kicker_hit; cs:1A2E jmp past the append, whatever kicker_hit did: while tilted (kicker_hit returns at cs:1B58..1B5A without setting the cooldown) the kicker colours are no contact at all. Harness: hand/bumper_hit_tilted has no response where the port reflects.",
+  "sensors.sprite_mask": "ball_pixel_scan cs:17E9: cs:17ED..17F8 copies the ball sprite (ds:63BC, 4-byte w/h header + 210 bytes) to ds:62E4; si walks it (cs:1818..181C, inc si per pixel cs:1861); cs:184A lockout test, then cs:184F cmp word ptr [si],0; je skip before the dispatch call cs:1854. Only EP2 has this test (EP1 cs:16DA..16E6 and EP3..EP13 scans have none). Harness: plunger_launch (layer 1) rules mode, handler 0xD1 cs:2BD2 fires at frame 119 on the original; without the mask the port fires at frame 118."
+ }
+}

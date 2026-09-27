@@ -1,0 +1,13 @@
+{
+ "name": "drain_layer_reset",
+ "table": 4,
+ "frames": 200,
+ "ball": {
+  "x": 150,
+  "y": 400,
+  "layer": 1
+ },
+ "description": "Ball 0 on layer 1 below the drain line: EP4 drain clears the drained slot's layer (cs:0A84 mov byte [di+5963],0 = ball_layer[slot]) before the serve at (284,336) (cs:0AE8), so the served ball is on layer 0 and the plunger lane (layer test cs:0BCB) works.",
+ "on_drain": "continue",
+ "inputs": [0,0,0,0,0,0,0,0,0,0,0,0,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4]
+}

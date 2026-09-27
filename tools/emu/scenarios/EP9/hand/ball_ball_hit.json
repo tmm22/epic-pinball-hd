@@ -1,0 +1,26 @@
+{
+ "name": "ball_ball_hit",
+ "table": 9,
+ "frames": 90,
+ "ball": {
+  "x": 147,
+  "y": 316,
+  "xf": 0,
+  "yf": 0,
+  "vx": 250,
+  "vy": 0
+ },
+ "balls": [
+  {
+   "x": 175,
+   "y": 316,
+   "xf": 0,
+   "yf": 0,
+   "vx": -250,
+   "vy": 0
+  }
+ ],
+ "description": "Ball 0 at (147,316) v=(250,0) and a ball in slot 1 at (175,316) v=(-250,0): ball 0 first differs from the single-ball run at record 3 (frame 1 step 0), before any wall contact of ball 0: ball-ball collision pair 0-1.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

@@ -1,0 +1,28 @@
+{
+ "table": 4,
+ "frames": 8,
+ "mode": "physics",
+ "ball": {
+  "x": 150,
+  "y": 398,
+  "vx": 0,
+  "vy": 300
+ },
+ "balls": [
+  {
+   "x": 100,
+   "y": 200,
+   "vx": 100,
+   "vy": 0
+  }
+ ],
+ "ds_pokes": [
+  [
+   2300,
+   1,
+   1
+  ]
+ ],
+ "on_drain": "continue",
+ "description": "EP4 multiball hand-over (cs:0A89..0ADA): the rule flag ds:08FC=1 (raw ds_pokes), ball 0 drains, slot 1 is active: slot 1 moves to slot 0 (x, y, vx, vy, layer) and the flag is cleared."
+}

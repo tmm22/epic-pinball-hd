@@ -1,0 +1,25 @@
+{
+ "name": "x_ball_ball_head_on",
+ "table": 10,
+ "frames": 150,
+ "ball": {
+  "x": 82,
+  "y": 194,
+  "xf": 0,
+  "yf": 0,
+  "vx": 300,
+  "vy": -40
+ },
+ "balls": [
+  {
+   "x": 108,
+   "y": 194,
+   "xf": 0,
+   "yf": 0,
+   "vx": -300,
+   "vy": -40
+  }
+ ],
+ "description": "2 balls in open space, ball 0 at (82,194); ball_ball_collide (cs:1d3e) first runs at step 2 before any wall contact of ball 0; pairs (di,si) [(0, 2)] in the first 12 frames.",
+ "inputs": []
+}

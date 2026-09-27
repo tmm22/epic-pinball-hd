@@ -1,0 +1,15 @@
+{
+ "name": "x_upper_right_flipper_kick_a1",
+ "table": 12,
+ "frames": 120,
+ "ball": {
+  "x": 141,
+  "y": 111,
+  "xf": 0,
+  "yf": 0,
+  "vx": 10,
+  "vy": 115
+ },
+ "description": "ball (141,111) v=(10,115) onto the upper-right flipper while it rises: first response frame 4 step 2 k=40, flipper_contact 2, ball y 122 < 300 -> push-out then the upper kick cs:1A91 at right angle 1 (1 upper kicks in 20 frames).",
+ "inputs": [0,0,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+}

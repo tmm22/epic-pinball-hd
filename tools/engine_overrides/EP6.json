@@ -1,0 +1,54 @@
+{
+ "format": "epic-pinball-engine-overrides/1",
+ "table": 6,
+ "exe": "EP6.EXE",
+ "note": "Additive patch for extracted/tables/EP6/engine.json: deep-merge 'patch' into the exporter's output (new keys only; nothing here renames or removes a key). export_engine_data.py does not read this directory yet. Only code addresses (cs:/ds: offsets in EP6's own segments), small engine constants and flags; nothing is copied from the game (pixel lists are referenced by their DS offset and read from the user's EXE). Every value is cited in 'evidence' and was run on the original code with the harness (scenarios in tools/emu/scenarios/EP6/hand/, generator scratch/tables/common/extra_scenarios.py).",
+ "patch": {
+  "gates": [
+   {
+    "id": "lane_exit_one_way",
+    "kind": "ball_position",
+    "when": "every_frame, main-loop order: before the per-frame counters (EP6 cs:0990)",
+    "flag_var": "0x6bcb",
+    "close_if": {
+     "flag_ne": 1,
+     "ball": 0,
+     "x_le": 230
+    },
+    "open_if": null,
+    "reopened_by": "ball_lost_fade (cs:31D3 flag=0, cs:31D8 redraw)",
+    "pixels": {
+     "list": "0x6bcc",
+     "list_format": "u16 count, then count u16 offsets",
+     "half": 0
+    },
+    "value_closed": 236,
+    "value_open": 1,
+    "side_var": {
+     "var": "0x59a8",
+     "closed": 1,
+     "open": 2
+    },
+    "draw_ip": "0x3bd4"
+   }
+  ],
+  "plunger": {
+   "lane_layer_test": false
+  },
+  "drain": {
+   "slots": 5,
+   "serve_when_empty": 5,
+   "clear_layer_on_drain": false,
+   "transfer": null
+  },
+  "sensors": {
+   "lockout_is_kicker_cooldown": true
+  }
+ },
+ "evidence": {
+  "gates": "cs:0979 cmp byte [6BCB],1; je 0990; cs:0980 cmp word [ball_x0 ds:69A3],0E6h; ja 0990; cs:0988 mov byte [6BCB],1; cs:098D call 3BD4. cs:3BD4: ES=[6B6D] (pf_seg_top), dl=ECh/al=1 if [6BCB]==1 else dl=01h/al=2; [59A8]=al; si=6BCC: lodsw count, then per pixel lodsw offset, mov es:[di],dl. Only other writer of [6BCB]: ball_lost_fade cs:31D3 (=0) then cs:31D8 call 3BD4. Boot value [6BCB]=0; the 32 pixels are a diagonal (241,12)..(255,40), 0x4F at boot (not solid). Harness: tools/emu/tables/EP6.json override (physics range cs:0979..099B); hand/gate_one_way_hit: original contact k=3 at frame 4 step 1 on the gate, the port passes through.",
+  "plunger.lane_layer_test": "lane guard cs:0AD5..0AEA: cmp word [ball_active0],0; je; cmp word [ball_x0],122h; jb; cmp word [ball_y0],154h; jb (no ball_layer test; EP1 cs:0AA4, EP7 cs:0A36, EP9 cs:0C6D test it). Harness: hand/lane_layer1_plunge (original charge 12 at record 0 on layer 1, port 0).",
+  "drain": "drain loop cs:09D2..09F6 (di = 10..2, slots 4..0, cx counts empty slots, serve when cx == 5 at cs:09F3); serve cs:09F8..0A15 stores serve_delay 7, y 15Ah, vy 0, vx 2, x 129h, active 1; no ball_layer store. serve.vx = 2 is already in engine.json: the port's serveBall ignores it (hand/serve_plunger_held: original vx 2 from record 6, port 0).",
+  "sensors.lockout_is_kicker_cooldown": "same fact as the exported kicker.cooldown_is_sensor_lockout, stated on the sensor side: kicker_hit cs:198A mov byte [5C3A],4; the only per-frame decrement cs:0990..099B; sensor handlers write [5C3A] (e.g. h29a9 saucer lockout 1, h2b79 lockout 15) and the ball scan reads it. The port keeps two counters: hand/bumper_hit_shared_lockout (event_lockout=8 poked; original kick 0, port kick 8) and, with rules loaded, the saucer h29a9 fires ~10 times per frame in the port instead of once (long_600_scripted, frame 329: original [4927] 49,48,47..., port 39,29,19,...)."
+ }
+}

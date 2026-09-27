@@ -1,0 +1,46 @@
+{
+ "format": "epic-pinball-engine-overrides/1",
+ "table": 4,
+ "exe": "EP4.EXE",
+ "note": "Additive patch for extracted/tables/EP4/engine.json: deep-merge 'patch' into the exporter's output (new keys only). export_engine_data.py does not read this directory yet. The upper-flipper kick tables are NOT copied: only their DS offsets and length are given, the loader reads the words from the user's EP4.EXE data segment (ds = 0x000E, file offset = header + (ds*16 + offset)). Every value is cited in 'evidence' and was checked by hand against the original's trace.",
+ "patch": {
+  "flipper_kick": {
+   "gate_detail": "supersedes gate_note (which omits the upper kick). flipper contact (flipper_contact != 0), all u16 ball coordinates: if y >= side_min_y the EP1 path runs (y -= 1, side/tip kick, return if it applied); otherwise the plain wall push-out (x -= p0[k], y += p1[k]). Then, first response only: if flipper_contact != 0 and y >= top_min_y the EP1 top kick; if flipper_contact != 0 and y < top_min_y the upper_kick below; else the normal kicker/reflection path.",
+   "upper_kick": {
+    "split_x": 145,
+    "vy_zero_if_positive": true,
+    "right": {"when": "u16 x >= split_x", "angle_group": 1, "dx": -1, "dy": 1, "vx_sub_table": "0x598f", "vy_sub_table": "0x59a5", "table_words": 10},
+    "left": {"when": "u16 x < split_x", "angle_group": 0, "dx": 1, "dy": 1, "vx_sub_table": "0x59bb", "vy_sub_table": "0x59d1", "table_words": 10, "rule_timer": {"var": "0x081c", "size": 2, "value": 400}},
+    "order": "if vy > 0 (signed): vy = 0; y += dy; x += dx; vx -= table_vx[angle]; vy -= table_vy[angle]; [left: rule_timer = value]; return (no nudge impulse)",
+    "table_segment": "ds"
+   }
+  },
+  "drain": {
+   "slots": 5,
+   "serve_when_empty": 5,
+   "clear_layer_on_drain": true,
+   "transfer": {
+    "when": "a slot drains while the multiball flag requires_flag_var == 1; the flag and rule_vars_cleared are cleared first; the move happens only if the drained slot is 0 and slot 1 is active",
+    "requires_flag_var": "0x08fc",
+    "rule_vars_cleared": ["0x08fc", "0x5529", "0x552b", "0x5531"],
+    "from_slots": [1],
+    "to_slot": 0,
+    "copies": ["x", "y", "vx", "vy", "layer"],
+    "not_copied": ["accx", "accy"],
+    "source_active_after": 0
+   }
+  },
+  "plunger": {
+   "lane_layer_test": true
+  }
+ },
+ "evidence": {
+  "flipper_kick.side gate": "collision_response cs:1B94 cmp byte [flipper_contact ds:595C],0; je; cs:1B9B cmp word [di+y],12Ch; jb 1BFA (plain push-out cs:1BFA..1C09); else cs:1BA3 y -= 1 and the EP1 side/tip path cs:1BA8..1BF7.",
+  "flipper_kick.top gate": "cs:1C0D collided -> ret; cs:1C17 flipper_contact == 0 -> cs:1CF1 normal path; cs:1C21 cmp word [di+y],136h; jb 1C62; cs:1C29..1C5F EP1 top kick.",
+  "flipper_kick.upper_kick": "cs:1C62 cmp word [di+x],91h; jb 1CBD. Right cs:1C6A..1C95: bx = 2*[ds:6D35] (right group angle), vy > 0 -> 0 (cs:1C70 jle), inc y, dec x, vx -= [bx+598F], vy -= [bx+59A5], jmp ret. Left cs:1CBD..1CEE: bx = 2*[ds:6D33], same with inc x, [bx+59BB], [bx+59D1], then cs:1CE8 mov word [081C],190h; jmp ret (cs:1E6B, after the nudge impulse). ds:081C is a rule timer: decremented per frame at cs:0A12..0A19, read by the handler at cs:24FD.",
+  "flipper_kick.upper_kick check": "fall_upper_right_flipper_held frame 1 step 1 (right angle 5): vx -14 - [598F+10] = -290, vy 0 - [59A5+10] = -252 = original; upper_left_flipper_shot frame 4 step 0 (left angle 3): vx -344 - [59BB+6] = -104, vy -[59D1+6] = -308 = original.",
+  "drain.clear_layer_on_drain": "drain loop cs:0A62..0AE6: cs:0A84 mov byte [di+5963],0 = ball_layer[slot] (layer array ds:5965, di = 2*slot+2). Harness: hand/drain_layer_reset serves a layer-1 ball on layer 0.",
+  "drain.transfer": "cs:0A89 cmp byte [08FC],1; jne; cs:0A90..0AA1 clear 08FC, 5529, 552B, 5531; cs:0AA7 cmp di,2 (slot 0 drained); cs:0AAC slot 1 active -> cs:0AB3..0ADA active[1]=0, active[0]=1, x/y/vx/vy/layer[0] = slot 1. Not exercised by a scenario: the harness pokes named variables only, and ds:08FC has no name (rule state).",
+  "plunger.lane_layer_test": "cs:0BCB cmp byte [ball_layer0 ds:5965],0; jne out."
+ }
+}

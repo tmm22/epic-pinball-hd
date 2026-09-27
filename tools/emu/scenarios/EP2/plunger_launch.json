@@ -1,0 +1,16 @@
+{
+ "name": "plunger_launch",
+ "table": 2,
+ "frames": 300,
+ "ball": {
+  "x": 284,
+  "y": 338,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0,
+  "layer": 1
+ },
+ "description": "Ball at the serve position (284,338); plunger held 62 frames (charge saturates at 708 after 59: step 12, max 700 ja), released. Highest point reached y=338. Ball on layer 1 as EP2 serves it (drain/serve cs:0AFB mov byte [ball_layer0],1; ball_slots_initial slot 0 layer 1); on layer 0 the lane art is wall and the first step pushes the ball out to x=265 (hand-edited: scenegen.py places it on layer 0).",
+ "inputs": [4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+}

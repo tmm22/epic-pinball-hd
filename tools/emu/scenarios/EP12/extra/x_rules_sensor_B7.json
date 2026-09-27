@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_B7",
+ "table": 12,
+ "frames": 200,
+ "ball": {
+  "x": 80,
+  "y": 145,
+  "xf": 0,
+  "yf": 0,
+  "vx": -150,
+  "vy": 0,
+  "layer": 0
+ },
+ "mode": "rules",
+ "description": "rules mode, level 0: ball (80,145) v=(-150,0) into the B7 sensor pixels around (76,152); the original dispatches B7 (handler cs:1f0f) first at frame 1; colours seen in 40 frames: B7.",
+ "inputs": []
+}

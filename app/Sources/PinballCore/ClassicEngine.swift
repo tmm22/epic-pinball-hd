@@ -89,8 +89,13 @@ public final class ClassicEngine {
     // Tables (from engine.json).
     let ring: [UInt16]
     let t0: [Int16], t1: [Int16], p0: [Int16], p1: [Int16]
-    let wallLUT: [[WallClass]]
-    let occLUT: [[OccClass]]
+    var wallLUT: [[WallClass]]
+    var occLUT: [[OccClass]]
+    let staticWall0: [WallClass]
+    /// EP8: the level-0 wall bound and occlusion bounds live in DS (see `refreshDynamicClasses`).
+    let dynWall: (addr: Int, initial: Int)?
+    let dynOcc: (front: Int, occ: Int, frontInit: Int, occInit: Int, sensorMax: Int)?
+    var dynState: (Int, Int, Int) = (-1, -1, -1)
     let fx: [Int16], fy: [Int16]
     let sensorHandlers: [[Int: EngineData.SensorHandler]]
     let groupMembers: [[Int]]
@@ -119,6 +124,8 @@ public final class ClassicEngine {
     public var extraGravity: Int16 = 0    // ds:06D7 (EP1)
     public var eventLockout: UInt8 = 0    // ds:676B
     public var eventCooldown: UInt8 = 0   // ds:676A
+    /// EP9-13: per-slot sensor lockouts (EP10 ds:3880 + 2i); `eventLockout` is the scan's scratch copy.
+    public var lockoutSlots: [UInt8] = [0, 0, 0, 0, 0]
     public var curLayer: UInt8 = 0        // ds:677E
     var obj = (x: Int16(0), y: Int16(0), vx: Int16(0), vy: Int16(0))  // ds:6A30..6A36
     var writeback: UInt8 = 0              // ds:589A
@@ -144,6 +151,14 @@ public final class ClassicEngine {
     public private(set) var lastStep = StepReport()
     /// Called after every physics step with (frame, step index within frame, report).
     public var onStep: ((Int, Int, StepReport) -> Void)?
+    /// The table's lifted rules (rules.json), attached with `RulesRuntime.attach(to:mode:)`.
+    public var rules: RulesRuntime?
+    /// How much of the original main loop runs through the rules (`.off` = physics only).
+    public var rulesMode: RulesMode = .off
+    /// Rules attached and enabled.
+    public var rulesActive: Bool { rules != nil && rulesMode != .off }
+    /// Why `EngineAssets.makeEngine` could not attach rules (nil if attached or not requested).
+    public var rulesLoadError: String?
 
     public init(data: EngineData, startBuffer: [UInt8]) throws {
         guard startBuffer.count == TableGeometry.width * TableGeometry.height else {
@@ -178,6 +193,12 @@ public final class ClassicEngine {
         }
         let ocodes = data.occlusion.codes.map(occClass)
         occLUT = data.occlusion.lut.map { $0.map { ocodes.indices.contains($0) ? ocodes[$0] : .front } }
+        staticWall0 = wallLUT[0]
+        if let a = Self.hexAddr(data.wall.level0LoVar) { dynWall = (a, data.wall.level0LoInitial ?? 0) } else { dynWall = nil }
+        if let b = data.occlusion.level0BoundsVars, let f = Self.hexAddr(b.frontMax), let o = Self.hexAddr(b.occludesMax),
+           let ini = data.occlusion.level0BoundsInitial {
+            dynOcc = (f, o, ini.frontMax, ini.occludesMax, data.occlusion.level0SensorMax ?? 0xF0)
+        } else { dynOcc = nil }
         sensorHandlers = data.sensors.levels.map { level in
             var m: [Int: EngineData.SensorHandler] = [:]
             for (k, v) in level { if let n = Int(k) { m[n] = v } }
@@ -217,7 +238,8 @@ public final class ClassicEngine {
         contactDir = 0; contactDirOpp = 0; crDvx = 0; crDvy = 0; hitList.removeAll()
         nudgeTimer = 0; tiltMeter = 0; tilted = false; plungerCharge = 0; serveDelay = 0
         extraGravity = Int16(truncatingIfNeeded: data.gravity.extraInitial)
-        eventLockout = 0; eventCooldown = 0; curLayer = 0; writeback = 0
+        eventLockout = 0; eventCooldown = 0; curLayer = 0; writeback = 0; lockoutSlots = [0, 0, 0, 0, 0]
+        dsLocal.removeAll()
         frameCount = 0; stepCount = 0; divideFaults = 0; loopGuardTrips = 0
         lastStep = StepReport()
     }
@@ -241,8 +263,9 @@ public final class ClassicEngine {
         balls[0].active = 1
         balls[0].x = Int16(truncatingIfNeeded: data.serve.x)
         balls[0].y = Int16(truncatingIfNeeded: data.serve.y)
-        balls[0].vx = 0
+        balls[0].vx = Int16(truncatingIfNeeded: data.serve.vx ?? 0)   // EP5 cs:0753, EP6 cs:0A09: vx = 2
         balls[0].vy = 0
+        if let l = data.serve.layer { balls[0].layer = UInt8(truncatingIfNeeded: l) }   // EP2 cs:0AFB (1), EP7 cs:0A27 (0)
         serveDelay = UInt8(truncatingIfNeeded: data.serve.delay)
     }
 
@@ -250,6 +273,61 @@ public final class ClassicEngine {
     public func setFlipperAngle(group g: Int, angle: Int) {
         groups[g].angle = Int16(max(0, min(9, angle)))
         redraw(group: g)
+    }
+
+    // MARK: - DS bytes outside the engine's own state
+
+    /// Rule/engine bytes addressed by DS offset in engine.json (gate flags, EP2/EP4/EP8 drain side
+    /// effects). With rules attached they live in the rules machine's data segment (so rule code sees
+    /// them); without, in this local map (initially 0, the boot value of every such byte we use).
+    var dsLocal: [Int: UInt8] = [:]
+
+    func dsRead(_ a: Int, _ w: Int, default d: Int = 0) -> Int {
+        if let r = rules { return Int(r.machine.read(a, w)) }
+        guard dsLocal[a & 0xFFFF] != nil else { return d }
+        var v = 0
+        for i in 0..<w { v |= Int(dsLocal[(a + i) & 0xFFFF] ?? 0) << (8 * i) }
+        return v
+    }
+
+    /// EP8: rebuilds the level-0 wall and occlusion classes when their DS bounds changed (the
+    /// transport cs:06B2..0843 and the drain switch [04A7] between EBh and FFh: with FFh only the
+    /// flipper colour collides and every pixel above 01 hides the ball).
+    func refreshDynamicClasses() {
+        guard dynWall != nil || dynOcc != nil else { return }
+        let lo = dynWall.map { dsRead($0.addr, 1, default: $0.initial) } ?? -1
+        let fr = dynOcc.map { dsRead($0.front, 1, default: $0.frontInit) } ?? -1
+        let oc = dynOcc.map { dsRead($0.occ, 1, default: $0.occInit) } ?? -1
+        guard (lo, fr, oc) != dynState else { return }
+        dynState = (lo, fr, oc)
+        if dynWall != nil { wallLUT[0] = staticWall0.enumerated().map { $0.offset < lo ? .empty : $0.element } }
+        if let d = dynOcc {
+            occLUT[0] = (0..<256).map { v in v <= fr ? .front : (v <= oc ? .occludes : (v <= d.sensorMax ? .sensor : .front)) }
+        }
+    }
+
+    func dsWrite(_ a: Int, _ w: Int, _ v: Int) {
+        if let r = rules { r.machine.write(a, w, Int64(v)); return }
+        if let sd = launchServeDelayVar, a == sd { serveDelay = UInt8(truncatingIfNeeded: v); return }
+        for i in 0..<w { dsLocal[(a + i) & 0xFFFF] = UInt8(truncatingIfNeeded: v >> (8 * i)) }
+    }
+
+    static func hexAddr(_ s: String?) -> Int? {
+        guard let s else { return nil }
+        let t = s.hasPrefix("0x") || s.hasPrefix("0X") ? String(s.dropFirst(2)) : s
+        return Int(t, radix: 16)
+    }
+
+    /// EP8's serve-delay byte (plunger.launch_block.serve_delay.var), bound like the lane's serve delay.
+    lazy var launchServeDelayVar: Int? = data.plunger.launchServeDelayVar.flatMap { Self.hexAddr($0) }
+
+    func runDSOps(_ ops: [EngineData.DSOp]) {
+        for o in ops {
+            switch o {
+            case let .write(a, w, v): dsWrite(a, w, v)
+            case let .branch(a, w, eq, t, e): runDSOps(dsRead(a, w) == eq & ((1 << (8 * w)) - 1) ? t : e)
+            }
+        }
     }
 
     // MARK: - Frame
@@ -267,40 +345,136 @@ public final class ClassicEngine {
     }
 
     /// Per-frame main-loop logic (main_loop cs:04D2 .. cs:1236), physics-relevant parts only.
+    /// With rules attached the rules runtime drives the frame (ClassicEngine+Rules.swift).
     public func frameLogic() {
+        if let r = rules, rulesMode != .off {
+            rulesFrameLogic(r)
+            return
+        }
         // cs:06E2 extra gravity timer
         if extraGravity != 0 { extraGravity &-= 1 }
-        // cs:09EC..0A09 per-frame counters
-        if eventLockout != 0 { eventLockout -= 1 }
-        if kickerCooldown != 0 { kickerCooldown -= 1 }
-        if eventCooldown != 0 { eventCooldown -= 1 }
+        positionGates()                   // EP6 cs:0979, EP9 cs:0550 (physics ranges of the harness)
+        frameCounters()
         drainCheck()
         plungerLane()
         nudgeTilt()
         gravityAndScan()
     }
 
-    /// drain_check cs:0A31: slots 4..0; y >= drain -> inactive; all empty -> serve.
+    /// cs:09EC..0A09 per-frame counters (EP9-13: one sensor lockout per ball slot, EP10 cs:0933).
+    func frameCounters() {
+        if let pb = data.sensors.lockoutPerBall {
+            for i in 0..<min(pb.slots, lockoutSlots.count) where lockoutSlots[i] != 0 { lockoutSlots[i] -= 1 }
+        } else if eventLockout != 0 { eventLockout -= 1 }
+        if kickerCooldown != 0 { kickerCooldown -= 1 }
+        if eventCooldown != 0 { eventCooldown -= 1 }
+    }
+
+    /// Ball-position gates (engine.json `gates`, kind "ball_position"): EP6 cs:0979..0990 closes a
+    /// one-way lane gate once ball 0 is left of x 230; EP9 cs:0550..0577 opens it every frame while
+    /// ball 0 is in the plunger lane (x >= 280) and closes it at x <= 215. The draw routine (EP6
+    /// cs:3BD4, EP9 cs:4091) writes value_closed / value_open over the pixel list read from the EXE.
+    func positionGates() {
+        guard let gs = data.gates else { return }
+        for g in gs where g.kind == "ball_position" {
+            guard let fv = Self.hexAddr(g.flagVar) else { continue }
+            if let o = g.openIf, o.flagNe == nil, let xge = o.xGe,
+               UInt16(bitPattern: balls[o.ball ?? 0].x) >= UInt16(truncatingIfNeeded: xge) {
+                dsWrite(fv, 1, 0)
+                drawGate(g)
+                continue
+            }
+            if let c = g.closeIf, dsRead(fv, 1) != (c.flagNe ?? 1), let xle = c.xLe,
+               UInt16(bitPattern: balls[c.ball ?? 0].x) <= UInt16(truncatingIfNeeded: xle) {
+                dsWrite(fv, 1, 1)
+                drawGate(g)
+            }
+        }
+    }
+
+    func drawGate(_ g: EngineData.Gate) {
+        guard let fv = Self.hexAddr(g.flagVar), let px = g.pixelList, let offs = px.offsets else { return }
+        let closed = dsRead(fv, 1) == 1
+        let v = UInt8(truncatingIfNeeded: (closed ? g.valueClosed : g.valueOpen) ?? 0)
+        let base = (px.half ?? 0) * 64000
+        for o in offs where base + o < buffer.count { buffer[base + o] = v }
+        if let sv = g.sideVar, let a = Self.hexAddr(sv.var) { dsWrite(a, 1, closed ? sv.closed : sv.open) }
+    }
+
+    /// drain_check cs:0A31: slots 4..0 (EP3 1..0, EP8 2..0); y >= drain -> inactive; all empty -> serve.
     func drainCheck() {
+        let d = data.drain
+        let n = d?.slots ?? 5
         var empty = 0
-        for i in stride(from: 4, through: 0, by: -1) {
+        for i in stride(from: n - 1, through: 0, by: -1) {
             if balls[i].active == 0 { empty += 1; continue }
             if UInt16(bitPattern: balls[i].y) < UInt16(truncatingIfNeeded: data.drainY) { continue }
             balls[i].active = 0
+            if d?.clearLayerOnDrain == true { balls[i].layer = 0 }           // EP4 cs:0A84
+            if let t = d?.transfer { drainTransfer(t, drained: i) }
+            if let ops = d?.onDrainOps { runDSOps(ops) }                     // EP8 cs:0A4F..0A8A
             empty += 1
         }
-        if empty == 5 { serveBall() }
+        guard d?.serveWhenEmptyPresent ?? true else { return }              // EP8: no serve
+        if empty == (d?.serveWhenEmpty ?? n) { serveBall() }
+    }
+
+    /// Multiball hand-over after a slot drains.
+    func drainTransfer(_ t: EngineData.Drain.Transfer, drained i: Int) {
+        if let fv = Self.hexAddr(t.requiresFlagVar) {
+            // EP4 cs:0A89..0ADA: only while the multiball flag is 1; the drained slot must be 0.
+            guard dsRead(fv, 1) == 1 else { return }
+            dsWrite(fv, 1, 0)
+            for a in (t.ruleVarsCleared ?? []).compactMap({ Self.hexAddr($0) }) where a != fv { dsWrite(a, 2, 0) }
+            guard i == t.toSlot else { return }
+            guard let s = t.fromSlots.first(where: { balls[$0].active == 1 }) else { return }
+            moveSlot(s, to: t.toSlot, copies: t.copies)
+            return
+        }
+        // EP2 cs:0A63..0AC5: slot 0 inactive and exactly one of slots 1/2 active -> it becomes slot 0.
+        let clear = Self.hexAddr(t.ruleVarCleared)
+        let act = t.fromSlots.filter { balls[$0].active == 1 }
+        if balls[t.toSlot].active == 1 {
+            if act.isEmpty, let c = clear { dsWrite(c, 1, 0) }             // cs:0AB7..0AC5
+            return
+        }
+        guard act.count == 1 else { return }
+        moveSlot(act[0], to: t.toSlot, copies: t.copies)
+        if let c = clear { dsWrite(c, 1, 0) }                               // cs:0AA3
+    }
+
+    func moveSlot(_ s: Int, to d: Int, copies: [String]) {
+        balls[s].active = 0
+        balls[d].active = 1
+        for f in copies {
+            switch f {
+            case "x": balls[d].x = balls[s].x
+            case "y": balls[d].y = balls[s].y
+            case "vx": balls[d].vx = balls[s].vx
+            case "vy": balls[d].vy = balls[s].vy
+            case "layer": balls[d].layer = balls[s].layer
+            default: break
+            }
+        }
     }
 
     /// cs:0A9D..0BC7: serve delay and plunger, only while ball 0 sits in the lane.
     func plungerLane() {
+        if data.plunger.kind == "launch_flag" { launchBlock(); return }
         let b = balls[0]
-        guard b.active != 0, b.layer == 0,
+        guard b.active != 0, (data.plunger.laneLayerTest == false || b.layer == 0),   // EP2 cs:0BB4, EP5, EP6: no layer test
               UInt16(bitPattern: b.x) >= UInt16(truncatingIfNeeded: data.plunger.laneMinX),
               UInt16(bitPattern: b.y) >= UInt16(truncatingIfNeeded: data.plunger.laneMinY) else { return }
         if serveDelay != 0 {
             serveDelay -= 1
-            if serveDelay == 1 {   // cs:0AFD ball_lost_fade: clears tilt and the ramp flags
+            if let r = rules, rulesMode != .off {
+                if serveDelay == 2 { r.runRange("serve2") }        // cs:0ACD queue a sound
+                if serveDelay == 1 {
+                    r.runRange("serve1")                           // cs:0ADA mode cleared
+                    if rulesMode == .full { r.ballLostFade() }     // cs:0AFD (skipped in `rules` mode)
+                    return
+                }
+            } else if serveDelay == 1 {   // cs:0AFD ball_lost_fade: clears tilt and the ramp flags
                 if ballLostResets {
                     tilted = false
                     balls[0].layer = 0
@@ -319,37 +493,104 @@ public final class ClassicEngine {
         // cs:0B83 released: vx = 0 every frame; fire if charged
         balls[0].vx = 0
         guard plungerCharge != 0 else { return }
+        let r = rulesActive ? rules : nil
+        r?.runRange("release")                 // cs:0B90..0BBA message, gate_draw, launch sound
         balls[0].vy &-= Int16(bitPattern: plungerCharge)
         plungerCharge = 0
         balls[0].y &-= 1
+        if let r, r.runRange("release2") == .completed {   // cs:0BCB..0BFE (jumps out unless between balls)
+            r.runRange("release3")             // cs:0C14 between-balls flag cleared
+        }
+    }
+
+    /// EP8 cs:0B62..0C65: no plunger lane. While ball 0 is on level 0 and no ball in slots 0..2 is
+    /// active: the serve delay counts down (at 1: three rule words cleared, ball_lost_fade, exit);
+    /// holding Ctrl or Space sets the launch flag to plunger.max and exits; otherwise, with the flag
+    /// set, the release places ball 0 at plunger.launch (accumulators and level kept), shows the
+    /// launch message and sets a few rule words. The up/down scroll keys (cs:0BAF..0BEE) come first
+    /// in the original; the port has no scroll keys in this path.
+    func launchBlock() {
+        guard balls[0].layer == 0, balls[0].active != 1, balls[1].active != 1, balls[2].active != 1 else { return }
+        let lb = data.plunger.launchBlock
+        if serveDelay != 0 {
+            serveDelay -= 1
+            if serveDelay == 1 {
+                if let ops = lb?.serveDelay?.opsAt1 { runDSOps(ops) }
+                if rulesMode == .full { rules?.ballLostFade() } else if !rulesActive && ballLostResets { tilted = false }
+                return
+            }
+        }
+        if input.contains(.plunger) || input.contains(.space) {
+            plungerCharge = UInt16(truncatingIfNeeded: data.plunger.max)   // cs:0C0A mov word [5AEC],2BCh
+            return
+        }
+        guard plungerCharge != 0, let l = data.plunger.launch else { return }
+        if let ops = lb?.releaseDsOps { runDSOps(ops) }
+        if rulesActive, let m = lb?.releaseMessage, let bx = Self.hexAddr(m.bx), let di = Self.hexAddr(m.di) {
+            rules?.showMessage(ds: bx, ax: m.ax, di: di)                  // cs:0C30 dmd_message
+        }
+        plungerCharge = 0
+        balls[0].vx = Int16(truncatingIfNeeded: l.vx)
+        balls[0].vy = Int16(truncatingIfNeeded: l.vy)
+        balls[0].active = 1
+        balls[0].x = Int16(truncatingIfNeeded: l.x)
+        balls[0].y = Int16(truncatingIfNeeded: l.y)
     }
 
     /// nudge_tilt cs:0DFD.
     func nudgeTilt() {
         let n = data.nudge
         if !input.isDisjoint(with: [.nudgeA, .nudgeB, .space]) && !tilted {
-            let inLane = UInt16(bitPattern: balls[0].x) >= UInt16(truncatingIfNeeded: n.laneMinX)
-                && UInt16(bitPattern: balls[0].y) > UInt16(truncatingIfNeeded: n.laneMaxY)
-            if !inLane && nudgeTimer == 0 {
+            let allowed: Bool
+            if n.laneTest == false {   // EP8 cs:0E23: some ball in slots 0..2 active, no lane exemption
+                allowed = balls[0].active != 0 || balls[1].active != 0 || balls[2].active != 0
+            } else {
+                allowed = !(UInt16(bitPattern: balls[0].x) >= UInt16(truncatingIfNeeded: n.laneMinX)
+                    && UInt16(bitPattern: balls[0].y) > UInt16(truncatingIfNeeded: n.laneMaxY))
+            }
+            if allowed && nudgeTimer == 0 {
                 tiltMeter &+= UInt8(truncatingIfNeeded: n.tiltAdd)
                 nudgeTimer = UInt8(truncatingIfNeeded: n.frames)
             }
         }
         if nudgeTimer != 0 { nudgeTimer -= 1 }
         if tiltMeter != 0 { tiltMeter -= 1 }
-        if tiltMeter > UInt8(truncatingIfNeeded: n.tiltThreshold) && !tilted { tilted = true }
+        if tiltMeter > UInt8(truncatingIfNeeded: n.tiltThreshold) && !tilted {
+            if rulesActive { rules?.runRange("tilt") }   // cs:0E72 TILT message, mode timer cleared
+            tilted = true
+        }
     }
+
+    /// Gravity terms beyond params.gravity + extra (EP9-13 `sub` a second DS word, gravity.terms).
+    lazy var extraGravityTerms: [(sub: Bool, addr: Int)] = {
+        let ev = Self.hexAddr(data.gravity.extraVar)
+        return (data.gravity.terms ?? []).compactMap { t in
+            guard let a = Self.hexAddr(t.var), a != ev else { return nil }
+            return (t.op == "sub", a)
+        }
+    }()
 
     /// gravity_and_objects cs:11A7 + ball_pixel_scan cs:1679 (sensors only).
     func gravityAndScan() {
+        refreshDynamicClasses()
         kickStrength = 0   // cs:119F
         let cutoff = Int16(truncatingIfNeeded: data.gravity.cutoff)
-        for i in 0..<5 where balls[i].active != 0 {
-            if balls[i].vy <= cutoff { balls[i].vy &+= params[9] &+ extraGravity }
+        let perBall = data.sensors.lockoutPerBall != nil
+        for i in 0..<min(5, data.gravity.slots ?? 5) where balls[i].active != 0 {
+            if balls[i].vy <= cutoff {
+                balls[i].vy &+= params[9] &+ extraGravity
+                for t in extraGravityTerms {
+                    let v = Int16(truncatingIfNeeded: dsRead(t.addr, 2))
+                    balls[i].vy = t.sub ? balls[i].vy &- v : balls[i].vy &+ v
+                }
+                if let sb = data.gravity.slotBonus, sb.slot == i { balls[i].vy &+= Int16(truncatingIfNeeded: sb.add) }   // EP3 cs:0F53
+            }
             curLayer = balls[i].layer
             obj = (balls[i].x, balls[i].y, balls[i].vx, balls[i].vy)
             writeback = 0
+            if perBall && i < lockoutSlots.count { eventLockout = lockoutSlots[i] }   // EP10 cs:1174 copy in
             if sensorsEnabled { pixelScan() }
+            if perBall && i < lockoutSlots.count { lockoutSlots[i] = eventLockout }   // EP10 cs:11B7 copy out
             balls[i].layer = curLayer
             if writeback != 0 {
                 balls[i].x = obj.x; balls[i].y = obj.y; balls[i].vy = obj.vy; balls[i].vx = obj.vx
@@ -360,8 +601,10 @@ public final class ClassicEngine {
     /// ball_pixel_scan cs:1679: sensor candidates under the 15x14 box fire table rules.
     func pixelScan() {
         let occ = occLUT[curLayer == 1 ? 1 : 0]
-        let alwaysFires = UInt8(truncatingIfNeeded: data.sensors.alwaysFiresValue)
+        let alwaysFires: Int = data.sensors.lockoutBypass ?? -1   // EP1 0xFE, EP7 0xDB; none in EP2/5/6/...
+        let mask: [UInt8]? = data.sensors.spriteMask == "word" ? data.ball.pixels : nil
         var lockout = eventLockout
+        var row = 0
         var dy = UInt16(bitPattern: obj.y)
         let rowBase = Int(UInt16(bitPattern: obj.y) &* 20) * 16
         var diRow = UInt16(bitPattern: obj.x)
@@ -369,19 +612,29 @@ public final class ClassicEngine {
             dy &+= 1
             if dy > 0x190 { break }
             var di = diRow
-            for _ in 0..<data.ball.w {
+            for col in 0..<data.ball.w {
                 let v = pixel(rowBase + Int(di))
-                if occ[Int(v)] == .sensor, v == alwaysFires || lockout == 0, eventCooldown == 0 {
+                var masked = false
+                if let m = mask {   // EP2 cs:184F cmp word [si],0 (the sprite word at this box position)
+                    let i = row * data.ball.w + col
+                    masked = (i < m.count ? m[i] : 0) == 0 && (i + 1 < m.count ? m[i + 1] : 0) == 0
+                }
+                if occ[Int(v)] == .sensor, !masked, Int(v) == alwaysFires || lockout == 0, eventCooldown == 0 {
                     dispatchSensor(Int(v))
                     lockout = eventLockout
                 }
                 di &+= 1
             }
             diRow &+= UInt16(TableGeometry.width)
+            row += 1
         }
     }
 
     func dispatchSensor(_ v: Int) {
+        if let r = rules, rulesMode != .off {
+            r.dispatch(value: v, layer: curLayer, tilted: tilted, lockout: eventLockout)
+            return
+        }
         guard let h = sensorHandlers[curLayer == 1 ? 1 : 0][v] else { return }
         if !(h.always ?? true) && tilted { return }
         run(h.ops)
@@ -494,6 +747,7 @@ public final class ClassicEngine {
     // MARK: - Physics step (timer ISR -> physics_step cs:1724)
 
     public func physicsStep() {
+        refreshDynamicClasses()
         var report = StepReport()
         responseLog.removeAll(keepingCapacity: true)
         collidedThisStep = false
@@ -506,6 +760,7 @@ public final class ClassicEngine {
             while UInt16(bitPattern: balls[i].y) < limit {
                 probe(ball: i)
                 if hitList.isEmpty { break }
+                if rulesActive { rules?.runRange("bigHit", di: 2 * i) }   // cs:18C5 hard-hit sound
                 collisionResponse(ball: i)
                 if report.firstDir == nil { report.firstDir = contactDir }
                 report.lastDir = contactDir
@@ -531,7 +786,10 @@ public final class ClassicEngine {
         var b = balls[i]
         _ = Self.integrateAxis(pos: &b.x, acc: &b.accx, v: b.vx, capPos: c.stepCap.xPos, capNeg: c.stepCap.xNeg,
                                clampPos: c.accClampPos, clampNeg: c.accClampNeg)
-        if b.x < Int16(c.minX) { b.x = Int16(c.minX) }
+        if let mx = c.maxX, UInt16(bitPattern: b.x) > UInt16(truncatingIfNeeded: mx) {   // EP8 cs:17A8 (before the x<1 test)
+            b.x = Int16(truncatingIfNeeded: mx)
+        }
+        if b.x < Int16(c.minX) { b.x = Int16(c.minXSet ?? c.minX) }   // EP5 cs:1328 stores 0
         let up = Self.integrateAxis(pos: &b.y, acc: &b.accy, v: b.vy, capPos: c.stepCap.yPos, capNeg: c.stepCap.yNeg,
                                     clampPos: c.accClampPos, clampNeg: c.accClampNeg)
         if up && b.y < Int16(c.minY) {   // only checked on the upward branch (cs:1813)
@@ -567,6 +825,9 @@ public final class ClassicEngine {
         }
     }
 
+    /// Collision-buffer write for rule code (gates, diverters).
+    func setBufferByte(_ i: Int, _ v: UInt8) { buffer[i] = v }
+
     @inline(__always)
     func pixel(_ linear: Int) -> UInt8 {
         // Beyond the 320x400 buffer the original reads the next segment; treat as empty.
@@ -588,7 +849,30 @@ public final class ClassicEngine {
             case .empty: continue
             case .wall: break
             case .active:
-                if kickerCooldown == 0 { kickerHit() }
+                // EP2 cs:19DF..1A2E (active_max, cooling wall, window, contact_on_fire), EP5 cs:141A (shared lockout)
+                let kd = data.kicker
+                if let am = kd.activeMax, Int(v) > am { continue }
+                if kickerCoolingNow {
+                    if kd.coolingContact == false { continue }
+                    break
+                }
+                if let w = kd.window {
+                    var outside = false
+                    for t in w {
+                        let c = t.coord == "x" ? UInt16(bitPattern: b.x) : UInt16(bitPattern: b.y)
+                        let val = UInt16(truncatingIfNeeded: t.value)
+                        switch t.noContactIf {
+                        case "ja": if c > val { outside = true }
+                        case "jae": if c >= val { outside = true }
+                        case "jb": if c < val { outside = true }
+                        case "jbe": if c <= val { outside = true }
+                        default: break
+                        }
+                    }
+                    if outside { continue }
+                }
+                if !(rulesActive && rules!.kicker(ball: i, contact: v)) { kickerHit(ball: i) }
+                if kd.contactOnFire == false { continue }
             case .flipper:
                 if x <= split {
                     if groups[map.contact1Moving].moving { flipperContact = 1 }
@@ -601,10 +885,32 @@ public final class ClassicEngine {
     }
 
     /// kicker_hit cs:19C1 (physics part; scoring is table rules).
-    func kickerHit() {
-        if data.kicker.tiltDisables && tilted { return }
+    func kickerHit(ball i: Int = 0) {
+        let k = data.kicker
+        if k.requiresLayer0 == true && balls[i].layer != 0 { return }   // EP2 cs:1B47
+        let cooldown = UInt8(truncatingIfNeeded: k.cooldownFrames)
+        if k.cooldownSetWhenTilted == true { setKickerCooldown(cooldown) }   // EP9-13: before the tilt test
+        if k.tiltDisables && tilted { return }
         kickStrength = UInt8(truncatingIfNeeded: params[2])
-        kickerCooldown = UInt8(truncatingIfNeeded: data.kicker.cooldownFrames)
+        if let kc = k.kickConstantWhenYAtLeast,
+           UInt16(bitPattern: balls[i].y) >= UInt16(truncatingIfNeeded: kc.y) {   // EP2 cs:1BD3
+            kickStrength = UInt8(truncatingIfNeeded: kc.kick)
+        }
+        if let ko = k.kickOverride, let my = ko.minY,
+           UInt16(bitPattern: balls[i].y) >= UInt16(truncatingIfNeeded: my) {     // EP11 cs:1A30 (unreachable)
+            kickStrength = UInt8(truncatingIfNeeded: ko.kick)
+        }
+        if k.cooldownSetWhenTilted != true { setKickerCooldown(cooldown) }
+    }
+
+    /// EP5/EP6 keep the kicker cooldown in the sensor-lockout byte (EP5 ds:43DE, EP6 ds:5C3A).
+    func setKickerCooldown(_ v: UInt8) {
+        if data.kicker.cooldownIsSensorLockout == true { eventLockout = v } else { kickerCooldown = v }
+    }
+
+    /// The byte the probe loop tests before the kicker (EP5 cs:141A / EP6: the sensor lockout).
+    var kickerCoolingNow: Bool {
+        data.kicker.cooldownIsSensorLockout == true ? eventLockout != 0 : kickerCooldown != 0
     }
 
     // MARK: - collision_response cs:1A66
@@ -699,7 +1005,8 @@ public final class ClassicEngine {
         var b = balls[i]
         defer { balls[i] = b }
         let r = data.flipperKick.ranges
-        if flipperContact != 0 {
+        let fk = data.flipperKick   // EP4 cs:1B94 / EP12 cs:19C3: side gate on (u16) y
+        if flipperContact != 0 && (fk.sideMinY == nil || UInt16(bitPattern: b.y) >= UInt16(truncatingIfNeeded: fk.sideMinY!)) {
             // cs:1AF3: y -= 1; side/tip kick along a fixed normal on every iteration
             b.y &-= 1
             var kp: Int?
@@ -720,6 +1027,19 @@ public final class ClassicEngine {
             b.y &+= p1[k]
         }
         if collidedThisStep { return }  // cs:1B5D: only the first response changes velocity
+        if flipperContact != 0, let top = fk.topMinY, UInt16(bitPattern: b.y) < UInt16(truncatingIfNeeded: top),
+           let uk = fk.upperKick {   // EP4 cs:1C21..1CEE, EP12 cs:1A50..1ABC: upper-flipper kick
+            let side: EngineData.FlipperKick.UpperKick.Side
+            if let sx = uk.splitX, let left = uk.left, UInt16(bitPattern: b.x) < UInt16(truncatingIfNeeded: sx) { side = left } else { side = uk.right }
+            let a = Int(groups[side.angleGroup].angle)
+            if b.vy > 0 { b.vy = 0 }
+            b.y &+= Int16(truncatingIfNeeded: side.dy)
+            b.x &+= Int16(truncatingIfNeeded: side.dx)
+            b.vx &-= Int16(truncatingIfNeeded: side.vxSub[a])
+            b.vy &-= Int16(truncatingIfNeeded: side.vySub[a])
+            if let rt = side.ruleTimer, let addr = Self.hexAddr(rt.var) { dsWrite(addr, rt.size, rt.value) }   // EP4 cs:1CE8
+            return
+        }
         if flipperContact != 0 {
             // cs:1B6E: ball resting on a moving flipper
             if b.vy >= Int16(truncatingIfNeeded: data.flipperKick.vyZeroTop) { b.vy = 0 }
@@ -755,6 +1075,7 @@ public final class ClassicEngine {
         b.vy &+= ref.dvy
         // cs:1D06: nudge impulse
         let ni = data.nudgeImpulse
+        if let sk = ni.skipSlots, sk.contains(i) { return }   // EP3 cs:1A85
         if nudgeTimer >= UInt8(truncatingIfNeeded: ni.minTimer)
             && contactDir >= UInt8(truncatingIfNeeded: ni.dirMin) && contactDir <= UInt8(truncatingIfNeeded: ni.dirMax) {
             b.vy &-= Int16(nudgeTimer &<< UInt8(truncatingIfNeeded: ni.vyShift))
@@ -782,6 +1103,9 @@ public final class ClassicEngine {
                 if groups[g].angle == 0 {
                     groups[g].moving = false
                 } else {
+                    if groups[g].angle == rest && rulesActive {   // cs:3D1F / 3DBD flipper sound
+                        rules?.runRange(info.key == "left" ? "flipperLeft" : "flipperRight")
+                    }
                     groups[g].moving = true
                     groups[g].angle -= 1
                     redraw(group: g)

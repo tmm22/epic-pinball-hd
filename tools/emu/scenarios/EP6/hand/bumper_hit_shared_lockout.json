@@ -1,0 +1,19 @@
+{
+ "name": "bumper_hit_shared_lockout",
+ "table": 6,
+ "frames": 200,
+ "ball": {
+  "x": 123,
+  "y": 74,
+  "xf": 0,
+  "yf": 0,
+  "vx": -300,
+  "vy": 0
+ },
+ "pokes": {
+  "event_lockout": 8
+ },
+ "description": "bumper_hit with event_lockout=8 poked. EP6 has ONE counter ds:5C3A for the sensor lockout and the kicker cooldown (ep_emu ds_vars event_lockout = kicker_cooldown = 0x5c3a; decremented once per frame at cs:0990), so the kicker is still cooling at the first contact (frame 0 step 2 k=20): kick 0 in the original.",
+ "generated_by": "scratch/tables/common/extra_scenarios.py",
+ "inputs": []
+}

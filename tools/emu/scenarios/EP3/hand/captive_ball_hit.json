@@ -1,0 +1,26 @@
+{
+ "name": "captive_ball_hit",
+ "table": 3,
+ "frames": 150,
+ "ball": {
+  "x": 200,
+  "y": 219,
+  "vx": 212,
+  "vy": -212
+ },
+ "description": "Ball 0 into the captive ball (slot 2 at (232,188)); ball-ball contact at frame 4 step 1. Slot 2 gets the extra gravity +2 per frame (cs:0F53..0F58, engine.json gravity.slot_bonus) and no nudge impulse (cs:1A85 cmp di,4); EP3 ball-ball divisor 45 (cs:1B47).",
+ "balls": [
+  {
+   "x": 201,
+   "y": 400,
+   "active": 0
+  },
+  {
+   "x": 232,
+   "y": 188,
+   "vx": 0,
+   "vy": 0
+  }
+ ],
+ "inputs": []
+}

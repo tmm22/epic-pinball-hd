@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_C9",
+ "table": 11,
+ "frames": 200,
+ "ball": {
+  "x": 206,
+  "y": 107,
+  "xf": 0,
+  "yf": 0,
+  "vx": 300,
+  "vy": 0,
+  "layer": 0
+ },
+ "mode": "rules",
+ "description": "rules mode, level 0: ball (206,107) v=(300,0) into the C9 sensor pixels around (223,114); the original dispatches C9 (handler cs:1fa2) first at frame 15; colours seen in 40 frames: C9 CB.",
+ "inputs": []
+}

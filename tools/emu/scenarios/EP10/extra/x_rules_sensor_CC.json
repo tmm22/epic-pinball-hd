@@ -1,0 +1,17 @@
+{
+ "name": "x_rules_sensor_CC",
+ "table": 10,
+ "frames": 200,
+ "ball": {
+  "x": 178,
+  "y": 156,
+  "xf": 0,
+  "yf": 0,
+  "vx": -300,
+  "vy": 0,
+  "layer": 0
+ },
+ "mode": "rules",
+ "description": "rules mode, level 0: ball (178,156) v=(-300,0) into the CC sensor pixels around (155,163); the original dispatches CC (handler cs:213b) first at frame 20; colours seen in 40 frames: CA CC.",
+ "inputs": []
+}

@@ -1,0 +1,15 @@
+{
+ "name": "flat_wall_hit",
+ "table": 10,
+ "frames": 120,
+ "ball": {
+  "x": 146,
+  "y": 152,
+  "xf": 0,
+  "yf": 0,
+  "vx": -300,
+  "vy": 0
+ },
+ "description": "Ball at (146,152) with v=(-300,0): first contact frame 12 step 0 is plain wall (colours F6 F7 F9), k=25, no kicker.",
+ "inputs": []
+}
