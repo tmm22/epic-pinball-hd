@@ -12,7 +12,7 @@ enum TraceMode {
             sc.table = o.table
         }
         if let gp = o.gravityPhase { sc.gravityPhase = gp }
-        let engine = try EngineAssets.makeEngine(dataRoot: dataRoot, table: sc.table)
+        let engine = try EngineAssets.makeEngine(dataRoot: dataRoot, table: sc.table, originalDir: o.originalURL)
         // A rules/full scenario without rules would silently test only the physics-only sensors.
         if let err = engine.rulesLoadError {
             warn("rules not loaded (\(sc.mode) mode runs the engine.json sensors only): \(err)")

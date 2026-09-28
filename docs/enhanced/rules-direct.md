@@ -20,7 +20,7 @@ Status (2026-09-28), details in [Verification](#verification):
 * EP1 per-frame check against the original (RulesLiveTests): **13,406 frames identical** (data segment,
   sounds, messages) on both backends.
 * Cost: at most **0.1 ms per frame** (release, EP2/EP8, ~1,000 emulated instructions per frame); the
-  frame budget at 59.94 Hz is 16.7 ms. Loading (discovery) takes 60-100 ms per table in a debug build.
+  frame budget at 59.94 Hz is 16.7 ms. Loading (discovery) takes 60-110 ms per table in a debug build.
 
 ## Using it
 
@@ -33,7 +33,9 @@ r.backend                                                                // .dir
 
 * `RulesBackend.default` is **direct**; `EPIC_PINBALL_RULES=lifted` (or `direct`) overrides it for the
   app, `--trace` and the harness (`EPIC_PINBALL_RULES=lifted .venv/bin/python tools/emu/run_suite.py ...`:
-  the variable passes through diff_traces.py to the Swift binary).
+  the variable passes through diff_traces.py to the Swift binary). `EpicPinball --rules lifted|direct`
+  sets the same variable for that process. Integration check (2026-09-28): `run_suite.py --modes
+  physics,rules` is 830/830 with each backend; autoplay reports carry `rulesBackend`.
 * If discovery fails on some EXE and a rules.json exists, `load` falls back to the lifted backend and
   records a warning. The lifted backend is unchanged otherwise and passes the same suites.
 * The EXE is looked up in `originalDir`, `$EPIC_PINBALL_ORIGINAL`, `<dataRoot>/../original` (development
@@ -106,7 +108,8 @@ Commands (the Swift binary from `app/`, the user's files in `original/` and `ext
 
 ```sh
 cd app && swift test --filter RulesDirectTests                 # discovery == rules.json, coverage, parity, library layout
-EP_PARITY_FRAMES=60000 swift test --filter RulesDirectTests.testLiftedAndDirect   # long random games
+EP_SUITE_SCENARIOS=all swift test --filter RulesDirectTests.testLiftedAndDirectBackendsAgreeOnTheSuiteScenarios   # 830 runs, ~8 min debug
+EP_PARITY_FRAMES=60000 swift test -c release -Xswiftc -enable-testing --filter RulesDirectTests.testLiftedAndDirectBackendsAgreeOnLongRandomGames
 swift test -c release -Xswiftc -enable-testing --filter RulesDirectTests.testPerFrameCost   # cost (EP_BENCH_FRAMES)
 EPIC_PINBALL_RULES=direct .venv/bin/python tools/emu/run_suite.py --modes physics,rules,full
 EPIC_PINBALL_RULES=lifted .venv/bin/python tools/emu/run_suite.py --modes physics,rules,full
@@ -123,15 +126,42 @@ Differential suite against the original (`run_suite.py`, 415 scenarios per mode)
 The two full-mode failures are EP8 `hand/ball_ball_hit` and `hand/ball_ball_slot2`, HARNESS_ERROR on the
 original side (emulation.md section 12), for both backends.
 
-Lifted vs direct on the suite's scenarios (every table and set, rules and full mode, `--state` traces:
-the data-segment diff after every frame, every sfx_play and dmd_message call with its registers, all 5
-ball slots and the counters): 830/830 identical, 139,423 frames.
+The port traces the two suite runs wrote (`scratch/rules-direct/{direct,lifted}/traces`, 1,243 files) are
+byte-identical.
+
+Lifted vs direct on the suite's scenarios (`testLiftedAndDirectBackendsAgreeOnTheSuiteScenarios`: every
+table and set, rules and full mode, `TraceRunner` state traces: the data-segment changes after every
+frame, every sfx_play and dmd_message call with its registers, all 5 ball slots and the counters; only
+the lifted block coverage `blk` is left out): 830/830 identical, 139,423 frames. By default the test
+runs the first 4 scenario files per table (`EP_SUITE_SCENARIOS=all` for the whole suite).
 
 Long random games (`testLiftedAndDirectBackendsAgreeOnLongRandomGames`): both backends side by side from
 a new game, AutoPlayer plus seeded random flips and nudges (tilts happen), 1-3 players, new game after
 game over; after every frame the whole data segment, the collision buffer, the ball slots, the flipper
 angles and the PresentationState (lamps, lamp sprites, scores, player, ball, message, texts, sounds,
-palette ring, game over) are compared. LONGRUN
+palette ring, game over) are compared. `EP_PARITY_FRAMES=60000` (release build, 95 s): identical on every
+table.
+
+| table | frames | games | players | sound events | frames with a message |
+|---|---|---|---|---|---|
+| EP1 | 60,000 | 8 | 2 | 5,840 | 33,583 |
+| EP2 | 60,000 | 5 | 3 | 5,268 | 58,042 |
+| EP3 | 60,000 | 16 | 1 | 5,268 | 0 |
+| EP4 | 60,000 | 14 | 2 | 5,270 | 52,325 |
+| EP5 | 60,000 | 7 | 3 | 5,514 | 0 |
+| EP6 | 60,000 | 15 | 1 | 5,212 | 57,990 |
+| EP7 | 60,000 | 6 | 2 | 5,262 | 59,046 |
+| EP8 | 60,000 | 4 | 3 | 5,069 | 59,820 |
+| EP9 | 60,000 | 12 | 1 | 5,759 | 57,300 |
+| EP10 | 60,000 | 11 | 2 | 5,407 | 58,634 |
+| EP11 | 60,000 | 7 | 3 | 5,421 | 58,425 |
+| EP12 | 60,000 | 14 | 1 | 5,393 | 56,871 |
+| EP13 | 60,000 | 19 | 2 | 5,110 | 56,679 |
+
+EP3 and EP5 show no message in these games with either backend: their rule code has only 3 (EP3) and
+1 (EP5) dmd_message calls (rules.json agrees), the other callers are outside the rule code (attract,
+start-up). Whether the original shows more there has not been checked (only EP1's messages are compared
+against the original, RulesLiveTests).
 
 What the comparison found (fixed; both backends now agree and match the original where checked):
 
@@ -145,10 +175,11 @@ What the comparison found (fixed; both backends now agree and match the original
   engine input in rule code (the lifted `["input", ...]`), and the gate routines must run from the EXE
   (the lifted backend drew them from rules.json `gates`).
 
-Cost (release build, `testPerFrameCostOfTheRulesBackends`, 6,000 frames of AutoPlayer games per table,
-Apple silicon): the direct backend's whole frame (engine + rules + presentation) takes 0.008-0.097 ms
-(EP2 0.097, EP8 0.094, others <= 0.027), executing 28-1,095 x86 instructions per frame; the lifted
-backend 0.006-0.089 ms. Both are below 0.6 % of the 16.68 ms frame.
+Cost (release build, `EP_BENCH_FRAMES=6000 ... testPerFrameCostOfTheRulesBackends`, 6,000 frames of
+AutoPlayer games per table, Apple silicon, 2026-09-28): the direct backend's whole frame (engine + rules +
+presentation) takes 0.007-0.089 ms (EP2 0.089, EP8 0.083, others <= 0.025), executing 28-1,095 x86
+instructions per frame (EP8 1,095, EP2 940, others <= 219); the lifted backend 0.005-0.080 ms, physics
+alone 0.002-0.004 ms. The worst case is 0.5 % of the 16.68 ms frame.
 
 ## Limits and open items
 

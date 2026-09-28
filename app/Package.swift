@@ -65,5 +65,12 @@ let package = Package(
             name: "PinballCoreTests",
             dependencies: ["PinballCore", "PinballRender"]
         ),
+
+        // Front-end logic without a window (settings, key bindings, high scores, catalog,
+        // library discovery, the first-launch import through the real importer).
+        .testTarget(
+            name: "EpicPinballTests",
+            dependencies: ["EpicPinball", "PinballCore", "PinballImport"]
+        ),
     ]
 )

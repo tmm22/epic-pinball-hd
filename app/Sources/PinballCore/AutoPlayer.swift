@@ -78,6 +78,10 @@ public struct AutoPlayReport: Sendable, Codable {
     public var divideFaults: Int
     public var ruleWarnings: [String]
     public var ruleFaults: [String]
+    /// "classic" (the integer engine) or "enhanced" (EnhancedPhysics installed); nil in older reports.
+    public var physics: String? = nil
+    /// The rules backend that ran ("direct" or "lifted"); nil without rules.
+    public var rulesBackend: String? = nil
 }
 
 public enum AutoPlay {
@@ -110,6 +114,7 @@ public enum AutoPlay {
                               gameOver: last.gameOver, soundEvents: sounds, messages: messages,
                               lampsLit: last.lamps.filter { $0 }.count, loopGuardTrips: e.loopGuardTrips,
                               divideFaults: e.divideFaults, ruleWarnings: r?.warnings ?? [],
-                              ruleFaults: Array(Set(r?.machine.faults ?? [])).sorted())
+                              ruleFaults: Array(Set(r?.machine.faults ?? [])).sorted(),
+                              physics: sim.physicsMode.rawValue, rulesBackend: r?.backend.rawValue)
     }
 }

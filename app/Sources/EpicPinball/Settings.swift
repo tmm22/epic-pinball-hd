@@ -17,9 +17,14 @@ enum AppPaths {
     }
     static var settingsFile: URL { supportRoot.appendingPathComponent("settings.json") }
     static var highScoresFile: URL { supportRoot.appendingPathComponent("highscores.json") }
+    /// `--library`: replaces the imported library's location only (settings and high scores stay
+    /// in `supportRoot`).
+    nonisolated(unsafe) static var libraryOverride: URL?
+
     /// The importer's output (PinballImport.LibraryLocation.defaultRoot unless overridden).
     static var libraryRoot: URL {
-        overrideRoot.map { $0.appendingPathComponent("Library", isDirectory: true) } ?? LibraryLocation.defaultRoot
+        if let l = libraryOverride { return l }
+        return overrideRoot.map { $0.appendingPathComponent("Library", isDirectory: true) } ?? LibraryLocation.defaultRoot
     }
 
     static func ensureSupportRoot() throws {

@@ -71,13 +71,15 @@ public struct TableExe: Sendable {
     }
 
     /// Locates `original/EP<table>.EXE`: explicit directory, `$EPIC_PINBALL_ORIGINAL`, then
-    /// `<dataRoot>/../original`. Returns nil if none exists.
+    /// `<dataRoot>/../original`, `<dataRoot>/original` (an imported library). Returns nil if none exists.
     public static func locate(table: Int, dataRoot: URL, explicitDirectory: String? = nil,
                               environment: [String: String] = ProcessInfo.processInfo.environment) -> URL? {
         var dirs: [URL] = []
         if let e = explicitDirectory { dirs.append(URL(fileURLWithPath: (e as NSString).expandingTildeInPath, isDirectory: true)) }
         if let e = environment["EPIC_PINBALL_ORIGINAL"], !e.isEmpty { dirs.append(URL(fileURLWithPath: e, isDirectory: true)) }
         dirs.append(dataRoot.deletingLastPathComponent().appendingPathComponent("original", isDirectory: true))
+        // An imported library keeps the user's files in <library>/original (docs/enhanced/import.md).
+        dirs.append(dataRoot.appendingPathComponent("original", isDirectory: true))
         for d in dirs {
             let u = d.appendingPathComponent("EP\(table).EXE")
             if FileManager.default.fileExists(atPath: u.path) { return u.standardizedFileURL }

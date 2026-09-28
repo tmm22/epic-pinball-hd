@@ -23,24 +23,82 @@ struct PlayfieldExtract {
             method = "fade-code"
         } else {
             // numpy: coarse = (sliding_window_view(d, 600)[:, probe] == ref[probe]).mean(axis=1); argmax (first max)
-            let probe = stride(from: 0, to: 600, by: 10).map { $0 }
-            var best = -1, bestAt = 0
-            if d.count >= 600 {
-                d.withUnsafeBufferPointer { p in
-                    for i in 0...(d.count - 600) {
-                        var c = 0
-                        for q in probe where p[i + q] == ref[q] { c += 1 }
-                        if c > best { best = c; bestAt = i; if c == probe.count { break } }
-                    }
-                }
-            }
-            off = bestAt
+            off = coarsePreviewMatch(d, ref: ref)
             method = "preview-match"
         }
         guard off >= 0, off + 768 <= d.count else { throw ImportError("\(exe.name): palette offset 0x\(String(off, radix: 16)) is outside the file") }
         var same = 0
         for i in 0..<600 where d[off + i] == ref[i] { same += 1 }
         return (off, Double(same) / 600.0, method)
+    }
+
+    /// Probe positions of extract.py's coarse search: 0, 10, ..., 590.
+    static let coarseProbes: [Int] = Array(stride(from: 0, to: 600, by: 10))
+
+    /// numpy `(sliding_window_view(d, 600)[:, probe] == ref[probe]).mean(axis=1).argmax()`, i.e. the
+    /// first offset with the most probe matches, computed exactly but without counting every probe at
+    /// every offset: pass 1 takes a lower bound B from the offsets whose first two probes match; pass 2
+    /// counts each offset only until it can no longer reach B (more than 60 - B misses). Every offset
+    /// that can reach the maximum (>= B) is counted in full, so the first maximum is the same as the
+    /// full scan's (`coarsePreviewMatchNaive`, checked in UnitTests).
+    static func coarsePreviewMatch(_ d: [UInt8], ref: [UInt8]) -> Int {
+        guard d.count >= 600, ref.count >= 600 else { return 0 }
+        let probes = coarseProbes
+        let np = probes.count
+        let last = d.count - 600
+        return d.withUnsafeBufferPointer { p -> Int in
+            ref.withUnsafeBufferPointer { r -> Int in
+                let rv = probes.map { r[$0] }
+                func fullCount(_ i: Int) -> Int {
+                    var c = 0
+                    for k in 0..<np where p[i + probes[k]] == rv[k] { c += 1 }
+                    return c
+                }
+                // pass 1: a lower bound for the maximum
+                var bound = 0
+                let r0 = rv[0], r1 = rv[1]
+                var i = 0
+                while i <= last {
+                    if p[i] == r0 && p[i + 10] == r1 {
+                        let c = fullCount(i)
+                        if c > bound { bound = c; if c == np { break } }
+                    }
+                    i += 1
+                }
+                // pass 2: exact first argmax among offsets that can reach the bound
+                let allowedMisses = np - bound
+                var best = -1, bestAt = 0
+                i = 0
+                while i <= last {
+                    var c = 0, miss = 0, k = 0
+                    while k < np {
+                        if p[i + probes[k]] == rv[k] { c += 1 } else {
+                            miss += 1
+                            if miss > allowedMisses { break }
+                        }
+                        k += 1
+                    }
+                    if k == np, c > best {
+                        best = c; bestAt = i
+                        if c == np { break }
+                    }
+                    i += 1
+                }
+                return bestAt
+            }
+        }
+    }
+
+    /// The literal full scan (reference for tests).
+    static func coarsePreviewMatchNaive(_ d: [UInt8], ref: [UInt8]) -> Int {
+        guard d.count >= 600, ref.count >= 600 else { return 0 }
+        var best = -1, bestAt = 0
+        for i in 0...(d.count - 600) {
+            var c = 0
+            for q in coarseProbes where d[i + q] == ref[q] { c += 1 }
+            if c > best { best = c; bestAt = i }
+        }
+        return bestAt
     }
 
     static func run(table n: Int, exe: MZImage, dat: [UInt8]) throws -> PlayfieldExtract {

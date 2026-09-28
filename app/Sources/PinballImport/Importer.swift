@@ -5,8 +5,9 @@ import Foundation
 
 public struct ImportOptions: Sendable {
     public enum Rules: Sendable, Equatable {
-        /// Do not provide rules.json (the app runs the rules directly from the EXE once that
-        /// track lands; until then such a table plays physics only).
+        /// Do not provide rules.json: the app's default rules backend (`RulesBackend.direct`) runs
+        /// the rule code from the copied EPn.EXE; rules.json is only its fallback (and the
+        /// `EPIC_PINBALL_RULES=lifted` backend).
         case none
         /// Copy `<dir>/tables/EPn/rules.json` (a tools/rules.py output directory) when present.
         case copy(from: URL)
@@ -166,14 +167,19 @@ public struct GameDataImporter: GameDataImporting {
                     let dir = stagingData.appendingPathComponent("tables/EP\(n)", isDirectory: true)
                     try TablePipeline.write(out, to: dir)
                     var rules = "direct-exe"
+                    var note: String? = nil
                     if let rd = rulesDir {
                         let src = rd.appendingPathComponent("tables/EP\(n)/rules.json")
                         if FileManager.default.fileExists(atPath: src.path) {
-                            try FileManager.default.copyItem(at: src, to: dir.appendingPathComponent("rules.json"))
-                            rules = "rules.json"
+                            if GameDataImporter.rulesMatchEXE(rulesDir: rd, table: n, exe: tf[n]!.exe) {
+                                try FileManager.default.copyItem(at: src, to: dir.appendingPathComponent("rules.json"))
+                                rules = "rules.json"
+                            } else {
+                                note = "table \(n): \(src.path) was lifted from a different EP\(n).EXE; not copied (the rules run directly from the EXE)"
+                            }
                         }
                     }
-                    let rec = TableRecord(outputs: out, rules: rules, seconds: CFAbsoluteTimeGetCurrent() - t0)
+                    let rec = TableRecord(outputs: out, rules: rules, seconds: CFAbsoluteTimeGetCurrent() - t0, note: note)
                     col.lock.lock(); col.results[n] = rec; col.done += 1; let d = col.done; col.lock.unlock()
                     progress(ImportProgress(fraction: 0.15 + 0.8 * Double(d) / Double(total), message: "Table \(n): \(out.name)"))
                 } catch {
@@ -183,11 +189,11 @@ public struct GameDataImporter: GameDataImporting {
             }
         }
         for (n, e) in col.errors.sorted(by: { $0.key < $1.key }) { warnings.append("table \(n) was not imported: \(e)") }
+        for n in tables { if let w = col.results[n]?.note { warnings.append(w) } }
         let done = tables.filter { col.results[$0] != nil }
         guard !done.isEmpty else { throw ImportError("no table could be imported:\n" + warnings.joined(separator: "\n")) }
-        for n in done where col.results[n]!.rules == "direct-exe" {
-            warnings.append("table \(n): no rules.json available; the rules have to run directly from EP\(n).EXE")
-        }
+        // "direct-exe" (no rules.json) is not a warning: the app's default rules backend
+        // (PinballCore RulesBackend.direct) runs the rule code from original/EPn.EXE.
 
         // 3. manifests
         progress(ImportProgress(fraction: 0.96, message: "Writing the library"))
@@ -214,6 +220,16 @@ public struct GameDataImporter: GameDataImporting {
         var outputs: TableOutputs
         var rules: String
         var seconds: Double
+        var note: String? = nil
+    }
+
+    /// rules.json (tools/rules.py) holds EXE addresses but no EXE hash, so it is only copied when it
+    /// was lifted from the same EXE: `<rulesDir>/../original/EPn.EXE` (the developer layout next to
+    /// extracted/) must be byte-identical to the imported one. Without that file it is copied as is.
+    static func rulesMatchEXE(rulesDir: URL, table n: Int, exe: [UInt8]) -> Bool {
+        let ref = rulesDir.deletingLastPathComponent().appendingPathComponent("original/EP\(n).EXE")
+        guard let d = try? Data(contentsOf: ref) else { return true }
+        return d.count == exe.count && d.elementsEqual(exe)
     }
 
     func libraryJSON(source: ImportSource, scan: SourceScan, tables: [TableRecord], copied: [String], warnings: [String], seconds: Double) -> JSONValue {

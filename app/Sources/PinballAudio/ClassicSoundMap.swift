@@ -62,7 +62,7 @@ public enum OriginalDataLocator {
     }
 
     /// Candidates in order: explicit path, `$EPIC_PINBALL_ORIGINAL`,
-    /// `$EPIC_PINBALL_DATA/../original`, `<package>/../original`.
+    /// `$EPIC_PINBALL_DATA/../original`, `$EPIC_PINBALL_DATA/original`, `<package>/../original`.
     public static func candidates(explicit: String? = nil) -> [URL] {
         var out: [URL] = []
         if let explicit { out.append(URL(fileURLWithPath: explicit, isDirectory: true)) }
@@ -71,6 +71,8 @@ public enum OriginalDataLocator {
         if let p = env["EPIC_PINBALL_DATA"] {
             out.append(URL(fileURLWithPath: p, isDirectory: true)
                 .deletingLastPathComponent().appendingPathComponent("original", isDirectory: true))
+            // An imported library (--data <library>) keeps the user's files in <library>/original.
+            out.append(URL(fileURLWithPath: p, isDirectory: true).appendingPathComponent("original", isDirectory: true))
         }
         out.append(packageRelativeDefault)
         return out

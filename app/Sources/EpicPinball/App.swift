@@ -116,6 +116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let w = window else { return }
         game?.stop()
         game = nil
+        model.hdPackStatus = nil
         model.screen = model.library == nil || model.screen == .importer ? .importer : .picker
         model.reloadTables()
         model.scoresVersion += 1
@@ -156,6 +157,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.contentView = screen.container
         w.makeFirstResponder(screen.view)
         screen.controller.applyDisplayRate()
+        // Smoke tests (--exit-after) on a Mac whose display is asleep or locked: MTKView's display
+        // link does not fire there, so drive the same draw(in:) from a 60 Hz timer instead.
+        if screen.controller.exitAfter != nil, CGDisplayIsAsleep(CGMainDisplayID()) != 0 {
+            print("smoke test: the main display is asleep; frames are driven by a 60 Hz timer")
+            screen.driveWithTimer()
+        }
     }
 
     func returnToPicker() {
@@ -323,17 +330,30 @@ final class GameScreen {
         self.container = container; self.view = view; self.controller = controller
     }
 
+    private var drawTimer: Timer?
+
     func stop() {
+        drawTimer?.invalidate()
+        drawTimer = nil
         controller.stop()
         view.isPaused = true
         view.delegate = nil
+    }
+
+    /// Draws from a timer instead of the display link (used when no display is awake).
+    func driveWithTimer(hz: Double = 60) {
+        view.isPaused = true
+        view.enableSetNeedsDisplay = false
+        drawTimer = Timer.scheduledTimer(withTimeInterval: 1 / hz, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.view.draw() }
+        }
     }
 
     static func make(options: Options, dataRoot: URL, preloaded: (TableAssets, ClassicEngine)?, app: AppDelegate?) throws -> GameScreen {
         let assets: TableAssets, engine: ClassicEngine
         if let p = preloaded { (assets, engine) = p } else {
             assets = try TableAssets.load(dataRoot: dataRoot, table: options.table)
-            engine = try EngineAssets.makeEngine(dataRoot: dataRoot, table: options.table)
+            engine = try EngineAssets.makeEngine(dataRoot: dataRoot, table: options.table, originalDir: options.originalURL)
             if let gp = options.gravityPhase { engine.gravityPhase = gp }
         }
         guard let device = MTLCreateSystemDefaultDevice() else { throw RenderError.noDevice }
@@ -358,6 +378,7 @@ final class GameScreen {
         controller.rulesOptions = options.rulesOptions
         controller.table = assets.table
         controller.cliPresentation = options.mode
+        controller.cliLighting = options.directPlay ? options.lighting : nil
         if options.autopilot {
             var player = AutoPlayer(engine: engine)
             sim.inputProvider = { player.input(for: $0) }
@@ -391,6 +412,7 @@ final class GameScreen {
             controller.onReturnToPicker = { [weak app] in app?.returnToPicker() }
             controller.onOpenSettings = { [weak app] in app?.openSettings() }
             controller.onScoresChanged = { [weak app] in app?.model.scoresVersion += 1 }
+            controller.onRenderStatus = { [weak app] in app?.model.hdPackStatus = $0 }
             controller.store = app.model.settings
             // The CLI flags of a direct start win over the stored settings for this session only.
             controller.apply(settings: app.model.settings, initial: true)
@@ -468,11 +490,15 @@ final class GameController: NSObject, MTKViewDelegate {
     var highRefresh = false
     /// `--mode` of a direct start (presentation only; enhanced physics implies enhanced presentation).
     var cliPresentation: SimulationMode = .classic
+    /// `--lighting` of a direct start: the level used while lighting is on (GameSettings only stores on/off).
+    var cliLighting: RenderSettings.Lighting?
     let overlay = OverlayModel()
     weak var overlayHost: NSView?
     var onReturnToPicker: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onScoresChanged: (() -> Void)?
+    /// Receives the HD pack status after every settings change (Settings > Display).
+    var onRenderStatus: ((String) -> Void)?
     private var lastState: PresentationState?
     private var pendingInitials: [(player: Int, score: UInt32)] = []
     private var lastInitials: String?
@@ -524,7 +550,9 @@ final class GameController: NSObject, MTKViewDelegate {
         highRefresh = g.highRefresh
         // Renderer: filter, HD pack, lighting and display-rate interpolation from the shared settings
         // (`EPIC_PINBALL_RENDER` still overrides them for developer runs).
-        renderer.settings = RenderSettings.fromEnvironment() ?? RenderSettings(g)
+        var rs = RenderSettings.fromEnvironment() ?? RenderSettings(g)
+        if let l = cliLighting, rs.lighting != .off, RenderSettings.fromEnvironment() == nil { rs.lighting = l }
+        renderer.settings = rs
         renderer.aspect = PixelAspect(rawValue: fe.pixelAspect) ?? .square
         camera.showFullTable = g.fullTableView
         // Physics: classic = the bit-exact integer engine, enhanced = the physics track's model.
@@ -534,6 +562,8 @@ final class GameController: NSObject, MTKViewDelegate {
         if let p = presentation, p.stripShown != fe.showStrip { p.setStrip(shown: fe.showStrip, immediately: initial) }
         audio?.apply(master: fe.masterVolume, music: g.musicVolume, sfx: g.sfxVolume)
         if !renderer.hdPackWarnings.isEmpty { for w in renderer.hdPackWarnings { warn("HD pack: \(w)") } }
+        onRenderStatus?(renderer.hdPackActive ? "active for table \(table)"
+                        : !rs.useHDPack ? "off" : "none for table \(table)" + (renderer.hdPackWarnings.first.map { " (\($0))" } ?? ""))
         applyDisplayRate()
     }
 
@@ -746,7 +776,7 @@ final class GameController: NSObject, MTKViewDelegate {
         let p = pendingInitials.removeFirst()
         if record, let hs = highScores {
             let e = HighScoreEntry(initials: overlay.initials.text, score: p.score, date: Date(),
-                                   players: overlay.finalScores.count, player: p.player, physics: sim.mode.rawValue)
+                                   players: overlay.finalScores.count, player: p.player, physics: sim.physicsMode.rawValue)
             if let r = hs.add(e, table: table) {
                 overlay.highlight = Set(overlay.highlight.map { $0 >= r ? $0 + 1 : $0 }.filter { $0 < HighScoreBook.capacity })
                 overlay.highlight.insert(r)
@@ -883,6 +913,11 @@ final class GameController: NSObject, MTKViewDelegate {
         } else {
             print("audio: off")
         }
+        print("rules: " + (sim.engine.rules.map { "\($0.backend.rawValue)" } ?? "none (\(sim.engine.rulesLoadError ?? "not requested"))"))
+        let rs = renderer.settings
+        print("render: filter \(rs.filter.rawValue), hd pack \(renderer.hdPackActive ? "active" : (rs.useHDPack ? "requested, none found" : "off")), "
+              + "lighting \(rs.lighting.rawValue), interpolate \(rs.interpolate), full table \(camera.showFullTable)"
+              + (renderer.hdPackWarnings.isEmpty ? "" : ", hd warnings: \(renderer.hdPackWarnings.joined(separator: "; "))"))
         print("game: score \(sim.engine.rules?.score ?? 0), game over \(gameOver), overlay \(overlay.mode), "
               + "high scores on table \(table): \(highScores?.entries(table: table).count ?? 0)")
         print("smoke test: \(frames) frames in \(String(format: "%.2f", elapsed)) s, drawable \(tex.width)x\(tex.height) (\(tex.pixelFormat == .bgra8Unorm ? "bgra8Unorm" : "format \(tex.pixelFormat.rawValue)")), backing scale \(scale), engine frames \(sim.engine.frameCount), display \(view.preferredFramesPerSecond) fps requested (screen max \(view.window?.screen?.maximumFramesPerSecond ?? 0), high refresh \(highRefresh), interpolation \(renderer.interpolation != nil), physics \(sim.physicsMode.rawValue))")

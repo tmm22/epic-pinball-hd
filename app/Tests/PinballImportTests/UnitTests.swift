@@ -209,3 +209,38 @@ final class ContractTests: XCTestCase {
         }
     }
 }
+
+/// The bounded palette search (extract.py's coarse preview match) against the literal full scan.
+final class PaletteSearchTests: XCTestCase {
+    struct LCG { var s: UInt64; mutating func next() -> UInt8 { s = s &* 6364136223846793005 &+ 1442695040888963407; return UInt8(truncatingIfNeeded: s >> 33) } }
+
+    func testBoundedSearchEqualsFullScanOnSyntheticData() {
+        var g = LCG(s: 42)
+        for trial in 0..<40 {
+            let n = 1_000 + Int(g.next()) * 20
+            // small alphabets give many ties and partial matches
+            let alphabet = [2, 3, 4, 16, 256][trial % 5]
+            var d = (0..<n).map { _ in UInt8(Int(g.next()) % alphabet) }
+            let ref = (0..<600).map { _ in UInt8(Int(g.next()) % alphabet) }
+            if trial % 3 == 0 {   // plant partial copies: the best one is not where probes 0 and 10 match
+                for (k, at) in [n / 5, n / 2].enumerated() where at + 600 <= n {
+                    for i in 0..<600 where (i / 10) % (k + 2) != 0 { d[at + i] = ref[i] }
+                }
+            }
+            if trial % 7 == 0 { d = [UInt8](repeating: 0, count: n) }
+            XCTAssertEqual(PlayfieldExtract.coarsePreviewMatch(d, ref: ref), PlayfieldExtract.coarsePreviewMatchNaive(d, ref: ref), "trial \(trial)")
+        }
+        XCTAssertEqual(PlayfieldExtract.coarsePreviewMatch([1, 2, 3], ref: [UInt8](repeating: 0, count: 600)), 0)
+    }
+
+    func testBoundedSearchEqualsFullScanOnTheUsersEXE() throws {
+        try Repo.requireOriginal()
+        let exe = try [UInt8](Data(contentsOf: Repo.original.appendingPathComponent("EP9.EXE")))
+        let dat = try [UInt8](Data(contentsOf: Repo.original.appendingPathComponent("EP9.DAT")))
+        let ref = Array(try PCXImage.decode(dat, name: "EP9.DAT").palette.prefix(600))
+        XCTAssertEqual(PlayfieldExtract.coarsePreviewMatch(exe, ref: ref), PlayfieldExtract.coarsePreviewMatchNaive(exe, ref: ref))
+        // a reference that matches nowhere well exercises the low-bound path
+        let shifted = ref.map { $0 &+ 1 }
+        XCTAssertEqual(PlayfieldExtract.coarsePreviewMatch(exe, ref: shifted), PlayfieldExtract.coarsePreviewMatchNaive(exe, ref: shifted))
+    }
+}

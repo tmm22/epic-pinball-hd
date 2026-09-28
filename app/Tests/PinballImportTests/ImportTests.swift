@@ -145,7 +145,7 @@ final class ISOImportTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: LibraryLayout.tableDirectory(dest, table: 1).appendingPathComponent("rules.json").path))
         let j = try parseJSON(Data(contentsOf: LibraryLayout.manifestURL(dest)))
         XCTAssertEqual(j["tables"]?[0]?["rules"]?.stringValue, "direct-exe")
-        XCTAssertTrue(lib.warnings.contains { $0.contains("no rules.json") })
+        XCTAssertFalse(lib.warnings.contains { $0.contains("rules") })   // direct-exe is the app's default backend
         // re-import over an existing library replaces it and leaves foreign items alone
         let foreign = dest.appendingPathComponent("hd-packs", isDirectory: true)
         try FileManager.default.createDirectory(at: foreign, withIntermediateDirectories: true)

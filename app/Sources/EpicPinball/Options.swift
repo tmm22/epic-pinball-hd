@@ -63,12 +63,29 @@ struct Options {
     var importFrom: String?
     /// Ball physics (`--physics`): classic = the bit-exact integer engine, enhanced = EnhancedPhysics.
     var physics: GameSettings.PhysicsMode = .classic
+    /// `--library DIR`: the imported library (instead of <support dir>/Library).
+    var libraryDir: String?
+    /// `--headless-import SRC`: import SRC (.iso or folder) into the library without a window, then exit.
+    var headlessImport: String?
+    /// `--rules lifted|direct`: the table-rules backend (sets $EPIC_PINBALL_RULES for this process).
+    var rulesBackend: RulesBackend?
+    /// Enhanced rendering from the command line (window direct starts and --snapshot).
+    var filterGiven = false
+    var renderSpec: String?
+    var hdPack = false
+    var lighting: RenderSettings.Lighting?
+    var highRefreshFlag = false
 
     /// Start straight into a table (the behaviour of earlier builds, used by the smoke tests and
     /// developer flags); otherwise the launcher (or the import screen on first launch) opens.
     var directPlay: Bool {
         !launcher && !forceImport && (tableGiven || exitAfter != nil || windowCapture != nil || demo || autopilot
             || hasPresentationFlags || message != nil || legacyWindow)
+    }
+
+    /// `--original DIR` as a URL (nil when not given: the loaders then use their own search order).
+    var originalURL: URL? {
+        originalDir.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL }
     }
 
     /// The game options PINBALL.EXE would pass (players, balls; sounds on, card present).
@@ -79,12 +96,26 @@ struct Options {
         return r
     }
 
+    /// The render settings the command line asks for, on top of `base` (the renderer's current
+    /// settings, i.e. `EPIC_PINBALL_RENDER` or classic); nil when no render flag was given.
+    func renderSettings(base: RenderSettings) -> RenderSettings? {
+        if let spec = renderSpec { return RenderSettings.fromEnvironment(["EPIC_PINBALL_RENDER": spec]) ?? base }
+        guard filterGiven || hdPack || lighting != nil else { return nil }
+        var s = base
+        if filterGiven { s.filter = filter }
+        if hdPack { s.useHDPack = true }
+        if let l = lighting { s.lighting = l }
+        return s
+    }
+
     /// Any of the demo presentation flags given (they replace the rules' state).
     var hasPresentationFlags: Bool { lamps != nil || score != nil || ballNumber != nil || player != nil }
 
     static let usage = """
-    usage: EpicPinball [--table N] [--data DIR] [--original DIR] [--aspect square|vga] [--mode classic|enhanced]
-                       [--filter nearest|xbrz-like|crt] [--demo]
+    usage: EpicPinball [--table N] [--data DIR | --library DIR] [--original DIR] [--aspect square|vga]
+                       [--physics classic|enhanced] [--filter nearest|smooth|xbrz|crt] [--hd-pack]
+                       [--lighting off|subtle|vivid] [--high-refresh] [--full] [--demo]
+           EpicPinball --headless-import CD.iso|FOLDER [--library DIR | --support-dir DIR]
            EpicPinball --snapshot OUT.png [--table N] [--full] [--scale N | --size WxH]
                        [--camera-y Y] [--sim-time S] [--launch] [--flip left|right|both]
                        [--scenario FILE --frames N] [--no-sprites]
@@ -93,12 +124,19 @@ struct Options {
            EpicPinball --trace SCENARIO.json [--out TRACE.jsonl] [--no-extra] [--gravity-phase N] [--require-rules]
            EpicPinball --autoplay N [--table N] [--json OUT.json]      (headless game, no window)
 
-      --data DIR       extracted data root (contains tables/EPn/). Default: ../extracted
-                       relative to the Swift package, or $EPIC_PINBALL_DATA.
+      --data DIR       runtime data root (contains tables/EPn/): an imported library or a developer
+                       extracted/ directory. Default: $EPIC_PINBALL_DATA, then (not inside a .app)
+                       ../extracted relative to the Swift package, then the imported library.
+      --library DIR    the imported library to use and import into (default: <support dir>/Library,
+                       i.e. ~/Library/Application Support/EpicPinballHD/Library)
+      --headless-import SRC  import SRC (the CD image .iso, or a folder with EP1.EXE ...) into the
+                       library with the Swift importer, print progress and exit (no window)
+      --rules B        table rules backend: direct (run from your EPn.EXE, default) or lifted
+                       (rules.json); the same as EPIC_PINBALL_RULES=B
       --table N        table 1...13 (default 1)
       --aspect A       square (1:1 pixels, default) or vga (1.2 tall pixels, 4:3 CRT look)
       --snapshot PATH  render one frame offscreen to a PNG and exit (no window)
-      --full           snapshot the whole 320x400 table instead of the 320x200 window
+      --full           snapshot (or window direct start): the whole 320x400 table instead of the window
       --scale N        snapshot integer scale (default 3)
       --size WxH       snapshot output size in pixels (overrides --scale; letterboxed)
       --camera-y Y     snapshot window top row (default: follow the ball)
@@ -118,7 +156,12 @@ struct Options {
       --original DIR   directory with your EPn.EXE (default: $EPIC_PINBALL_ORIGINAL, then
                        ../original next to the data root). Sprites, fonts, strip layout and
                        message text are read from it at runtime.
-      --filter F       upscaler: nearest (default), xbrz-like (edge-directed placeholder), crt
+      --filter F       upscaler: nearest (default, the classic look), smooth (Catmull-Rom), xbrz, crt
+      --hd-pack        use the table's HD pack if one is installed (tools/hdpack/make_pack.py)
+      --lighting L     off (default), subtle or vivid lamp glow, ball highlight and shadow
+      --high-refresh   window: display-rate interpolation of ball, flippers and camera
+      --render SPEC    developer override, e.g. filter=xbrz,hd=1,lighting=subtle,interp=1,scaling=fill
+                       (the same as EPIC_PINBALL_RENDER=SPEC; wins over the flags above)
       --strip on|off   snapshot: strip shown (default) or hidden (as after Enter)
       --legacy-window  old 320x200 window without strip/overlays
       --lamps SPEC     demo lamp states: none (no overlays), a, b, rest (records matching the
@@ -153,7 +196,8 @@ struct Options {
                        auto-play N frames, then render the frame (a mid-game snapshot)
       --json FILE      write the --autoplay report to FILE
       --autopilot      window: the auto-player plays (plunge and flip) until you press a game key
-      --require-rules  trace mode: fail if rules.json does not load (instead of a warning)
+      --require-rules  trace mode: fail if the table rules do not load (from the EXE, or from rules.json
+                       with --rules lifted) instead of a warning
 
     front end (window):
       without --table (and the smoke-test / demo flags) the launcher opens: table picker, settings,
@@ -177,7 +221,7 @@ struct Options {
           nudge elsewhere, Ctrl plunger, Z or , nudge (+x), / nudge (-x), Up/Down scroll,
           Enter show/hide the display strip, P pause, M music on/off, S effects on/off,
           - / = master volume, [ / ] music volume, R new game (new ball without rules),
-          Tab full table, A pixel aspect, E classic/enhanced, F cycle upscale filter,
+          Tab full table, A pixel aspect, E classic/enhanced physics, F cycle upscale filter,
           Esc menu (resume, new game, settings, choose table, quit), Cmd-Q quit.
           All game keys can be changed in Settings > Controls; game controllers work too.
     """
@@ -276,6 +320,20 @@ struct Options {
                     throw ParseError.message("--filter must be one of \(UpscaleFilter.allCases.map(\.rawValue).joined(separator: ", "))")
                 }
                 o.filter = f
+                o.filterGiven = true
+            case "--render": o.renderSpec = try value(a)
+            case "--hd-pack": o.hdPack = true
+            case "--lighting":
+                let v = try value(a)
+                guard let l = RenderSettings.Lighting(rawValue: v) else { throw ParseError.message("--lighting must be off, subtle or vivid") }
+                o.lighting = l
+            case "--high-refresh": o.highRefreshFlag = true
+            case "--library": o.libraryDir = try value(a)
+            case "--headless-import": o.headlessImport = try value(a)
+            case "--rules":
+                let v = try value(a)
+                guard let b = RulesBackend(rawValue: v.lowercased()) else { throw ParseError.message("--rules must be direct or lifted") }
+                o.rulesBackend = b
             case "--strip":
                 switch try value(a) {
                 case "on": o.stripShown = true

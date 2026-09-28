@@ -2,33 +2,21 @@ import Foundation
 import PinballCore
 import PinballImport
 
-/// The one place the front end chooses a `GameDataImporting` implementation.
+/// The one place the front end chooses a `GameDataImporting` implementation: the PinballImport
+/// track's pure-Swift importer (CD image or game folder -> the per-user library). Developer
+/// folders that already contain `tables/EPn/` (an `extracted/` directory made by the Python
+/// tools) are handled by `ExtractedFolderImporter` instead.
 ///
-/// INTEGRATION POINT: `libraryImporter()` returns the PinballImport track's concrete importer.
-/// Until that type exists this returns `UnavailableImporter`, which fails with a clear message
-/// (the rest of the first-launch flow, progress UI and picker hand-off are coded against the
-/// protocol and need no change). Developer folders that already contain `tables/EPn/` (an
-/// `extracted/` directory made by the Python tools) are always handled by
-/// `ExtractedFolderImporter`.
+/// No rules.json is imported (`rules: .none`): the default rules backend runs the table rules
+/// straight from the copied EPn.EXE, so a library is the same on every Mac (the importer's
+/// `.automatic` would copy a developer checkout's lifted rules when one exists).
 func libraryImporter() -> any GameDataImporting {
-    UnavailableImporter()
+    GameDataImporter(options: ImportOptions(rules: .none))
 }
 
 func makeImporter(for source: ImportSource) -> any GameDataImporting {
     if case let .directory(u) = source, GameLibrary.hasTables(u) { return ExtractedFolderImporter() }
     return libraryImporter()
-}
-
-struct UnavailableImporter: GameDataImporting {
-    struct NotAvailable: Error, CustomStringConvertible {
-        var description: String {
-            "This build has no CD/folder importer yet (PinballImport). Choose an extracted data folder "
-                + "(one that contains tables/EP1 …) or start the app with --data DIR."
-        }
-    }
-    func validate(_ source: ImportSource) throws -> [String] { throw NotAvailable() }
-    func importGame(from source: ImportSource, to destination: URL,
-                    progress: @Sendable (ImportProgress) -> Void) throws -> ImportedLibrary { throw NotAvailable() }
 }
 
 /// Developer import: copies an existing runtime-data directory (`tables/EPn/...`, as written by

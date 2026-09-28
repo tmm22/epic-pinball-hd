@@ -29,6 +29,8 @@ final class AppModel {
     var controllers: [String] = []
     /// Non-fatal problem to show in the picker (e.g. a table failed to load).
     var notice: String?
+    /// The running table's HD pack state (Settings > Display); nil outside a game.
+    var hdPackStatus: String?
 
     @ObservationIgnored let settings: SettingsStore
     @ObservationIgnored let scores: HighScoreStore

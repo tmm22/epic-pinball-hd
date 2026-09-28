@@ -12,7 +12,8 @@ as before.
 | Finder / no arguments | the **launcher** (table picker), or the **import screen** if no game data is found |
 | `--table N` (or `--exit-after`, `--window-capture`, `--demo`, `--autopilot`, the presentation flags, `--legacy-window`) | straight into table N, as in earlier builds (developer / smoke-test runs; settings are not saved) |
 | `--launcher [--table N] [--autostart]` | the launcher with N preselected; `--autostart` presses Play (smoke test of the picker-to-game path) |
-| `--import` | the import screen |
+| `--import`, `--import-from P` | the import screen (with P: imports P at once, no file panel) |
+| `--headless-import P [--library DIR]` | no window: imports P (.iso or folder) with the Swift importer, prints progress, exits |
 | `--trace`, `--snapshot`, `--autoplay N` | headless, unchanged |
 
 Data lookup (`GameLibrary.locate`, `TableCatalog.swift`):
@@ -24,17 +25,33 @@ Data lookup (`GameLibrary.locate`, `TableCatalog.swift`):
 
 The user's original files (EPn.EXE, EPn.DAT, IDn.DAT, SFXn.PIN, SONGn.PSM) are looked for in
 `--original DIR`, `$EPIC_PINBALL_ORIGINAL`, `<root>/original`, `<root>`, then `original/` next to
-the root. Headless and direct starts keep the old order and use the library only when nothing else
-is found.
+the root.
+
+Headless modes and direct starts (`resolveDataRoot`, main.swift): `--data DIR`; `--library DIR`;
+`$EPIC_PINBALL_DATA`; outside a `.app` only the developer `../extracted` candidates (so the
+differential harness, which passes no `--data`, is unchanged); then the imported library. For
+an explicit `--data` / `--library` and for the library, `--original` defaults to the original
+folder next to the root (`<root>/original`), so rules, fonts, messages and audio all come from
+the library; for the developer candidates the loaders keep their own order (harness traces unchanged).
 
 `--support-dir DIR` replaces `~/Library/Application Support/EpicPinballHD` (settings, high scores,
-library) for tests and screenshots.
+library) for tests and screenshots; `--library DIR` replaces only the library location (import
+target and data root).
+
+Other developer flags: `--rules direct|lifted` (the same as `EPIC_PINBALL_RULES`), `--physics
+classic|enhanced`, `--filter nearest|smooth|xbrz|crt`, `--hd-pack`, `--lighting off|subtle|vivid`,
+`--high-refresh`, `--full` (whole table), `--render SPEC` (the same as `EPIC_PINBALL_RENDER`). In a
+direct start the render and physics flags go into the (unsaved) session settings, so they take the
+same path as the Settings panel; in `--snapshot` they are applied on top of `EPIC_PINBALL_RENDER`.
 
 ## Launcher
 
-`LauncherUI.swift`, `AppModel.swift`. A grid of the 13 tables: preview = the table's own
-table-select screen (`EPn.DAT`, ZSoft PCX decoded by `PCXImage`), else `tables/EPn/preview.png`;
-name = `IDn.DAT` (20 bytes, space padded, 0x1A terminated), else "Table n". Both are read at
+`LauncherUI.swift`, `AppModel.swift`. A grid of the 13 tables (5 columns): preview = the table's own
+table-select screen (`EPn.DAT`, ZSoft PCX decoded by `PCXImage`), else `tables/EPn/preview.png`,
+cropped to the table art (`TableCatalog.tableArt`: the 320x200 screen has the art in columns
+0-159 and an empty high-score box in the right half, the same on all 13 tables), shown portrait
+(160x200, 1.2x taller with the VGA pixel shape); name = `IDn.DAT` (20 bytes, space padded, 0x1A
+terminated), else "Table n". Both are read at
 runtime from the user's files; nothing about the tables is in the app. A table whose runtime files
 (`playfield_idx.npy`, `palette.json`, `engine.json`) are missing is greyed out. The side panel shows
 the selected table's top 10, players (1-4) and balls (3/5), and Play.
@@ -134,17 +151,30 @@ user's own copy is needed, then *Choose CD image…* (NSOpenPanel, .iso) or *Cho
 `AppPaths.libraryRoot`); progress and messages are shown, errors are shown with a retry, and on
 success the picker opens with the new library.
 
-`libraryImporter()` in `ImporterHookup.swift` is the one line that names the concrete importer. A
-folder that already contains `tables/EPn/` (a developer `extracted/` directory) is handled by
-`ExtractedFolderImporter`, which copies it and the originals next to it into the library (staged,
-then moved into place). Developer fallback: `--data ../extracted`.
+`libraryImporter()` in `ImporterHookup.swift` is the one line that names the concrete importer:
+`PinballImport.GameDataImporter(options: ImportOptions(rules: .none))` (pure Swift; CD image or
+game folder; about 2 s for all 13 tables from the 1995 CD in a debug build). `rules: .none`: the
+library never carries a lifted rules.json (the importer's `.automatic` would copy one from a
+developer checkout), so a library is the same on every Mac and the rules always run from the EXE. A folder that already contains `tables/EPn/` (a
+developer `extracted/` directory) is handled by `ExtractedFolderImporter`, which copies it and the
+originals next to it into the library (staged, then moved into place). Developer fallback:
+`--data ../extracted`.
+
+Games started from the library get `originalDir = <library>/original` for the rules, the classic
+presentation and the audio (`EngineAssets.makeEngine(..., originalDir:)` is given `--original` /
+the library's original folder everywhere: window, snapshot, autoplay, trace; without `--original`
+the loaders keep their own search order, so traces are unchanged). The rules then run from the
+user's EXE (`RulesBackend.direct`, the default) whether or not the library has `rules.json`.
 
 ## Packaging
 
 ```sh
-tools/package_app.sh [--bundle-id ID] [--version X.Y] [--no-zip] [--skip-build] [--original DIR]
+tools/package_app.sh [--bundle-id ID] [--version X.Y] [--no-zip] [--skip-build] [--original DIR] \
+                     [--scratch-path DIR] [--no-run-check] [--lenient] [--iso FILE] [--keep-check DIR]
 # -> build/EpicPinballHD.app, build/EpicPinballHD.zip
 ```
+
+`--scratch-path` builds in a private directory (other work sharing `app/.build` is not disturbed).
 
 1. `swift build -c release --arch arm64 --product EpicPinball`.
 2. Bundle: `Contents/MacOS/EpicPinball`, `Info.plist` from `app/Resources/Info.plist` (bundle id
@@ -156,24 +186,47 @@ tools/package_app.sh [--bundle-id ID] [--version X.Y] [--no-zip] [--skip-build] 
 4. Dylibs: every non-system dependency, found recursively from the binary with `otool -L`
    (libopenmpt, mpg123, ogg, vorbis, vorbisfile), is copied to `Contents/Frameworks`. Their ids
    become `@rpath/NAME`, references between them `@loader_path/NAME`, the executable's
-   `@rpath/NAME` with an `@executable_path/../Frameworks` rpath; rpaths into Homebrew or the build tree
-   are removed. The script fails if any `otool -L` line still points at `/opt/homebrew`,
+   `@rpath/NAME` with an `@executable_path/../Frameworks` rpath; rpaths into Homebrew, the build tree or the Xcode toolchain
+   are removed (left: `/usr/lib/swift @loader_path @executable_path/../Frameworks`). The script fails if any `otool -L` line still points at `/opt/homebrew`,
    `/usr/local` or the repository.
 5. No game data: the script fails if the bundle contains any game-like file type (.exe, .dat, .pin,
    .psm, .iso, .npy, .pcx, .mus, .wav, .png, playfield / palette / engine / rules / sprites /
    collision files), or any table name read from the user's `original/IDn.DAT`.
-6. Ad-hoc signature (`codesign --sign -`, dylibs first), `codesign --verify --strict`, then
-   `ditto -c -k --keepParent` to the zip.
+6. Ad-hoc signature (`codesign --sign -`, dylibs first), `codesign --verify --strict`.
+7. Runtime check (`--no-run-check` skips it): the packaged binary runs with `DYLD_PRINT_LIBRARIES`
+   and must load every non-system dylib from its own `Contents/Frameworks` (none from Homebrew or
+   the repository). Then, **as on a Mac that never built the app and has no Python**: under
+   `sandbox-exec` with `extracted/`, `.venv`, `app/.build`, the release build dir (and `original/`
+   when a CD image is used) unreadable and `python` not executable, and with the build tree's
+   resource bundle renamed away, the packaged binary
+   * imports the CD image (`--iso`, default the first `*.iso` in the repository root; else
+     `original/`) into a fresh `--support-dir` with `--headless-import`;
+   * checks that the library has no `rules.json`;
+   * plays table 1 (classic physics) and table 10 (enhanced physics) to game over with `--autoplay`,
+     requiring `gameOver` and `rulesBackend: direct` in the report;
+   * renders an xbrz + lighting `--snapshot` of table 1 from that library, with no
+     "EXE not found" warning.
+   A failure stops the script before the zip (`--lenient`: warning only). `--keep-check DIR` keeps
+   the logs, reports and snapshot. Paths are physical (`pwd -P`) because dyld reports resolved paths.
+8. `ditto -c -k --keepParent` to the zip.
 
-The packaged app runs without Homebrew as far as dylibs are concerned (`DYLD_PRINT_LIBRARIES`
-shows all five loaded from `Contents/Frameworks`). **Open issue:** the shader lookup. SwiftPM's
-generated `Bundle.module` accessor for PinballRender looks only at `<App>.app/EpicPinball_PinballRender.bundle`
-(the bundle root, which codesign refuses to seal: "unsealed contents present in the bundle root")
-and at the absolute build path. On the build machine the build path exists; on another Mac it does
-not, and `Bundle.module` calls `fatalError`. Fix (render track, `PinballRenderer.shaderSource()`):
-look for `Bundle.main.url(forResource: "Pinball", withExtension: "metal")` (the copy the script puts in
-`Contents/Resources`) or `Bundle.main.resourceURL/EpicPinball_PinballRender.bundle` before touching
-`Bundle.module`.
+Dylibs: verified, the packaged binary loads libopenmpt, mpg123, ogg, vorbis and vorbisfile from
+`Contents/Frameworks` and nothing from Homebrew (runtime check, and `DYLD_PRINT_LIBRARIES` during a
+game with music).
+
+**Shader lookup (fixed).** SwiftPM's generated `Bundle.module` for PinballRender only looks at
+`<App>.app/EpicPinball_PinballRender.bundle` (the bundle root, which codesign refuses to seal) and at
+the absolute build path, and calls `fatalError` when neither exists. `PinballRenderer.shaderSource()`
+therefore looks in the `.app`'s own `Contents/Resources` first (`Pinball.metal`, then the copied
+resource bundle) whenever it runs from a `.app`, and uses `Bundle.module` only for `swift run` and
+the tests. The runtime check above covers it (resource bundle renamed away).
+
+Checked on 2026-09-28 (`tools/package_app.sh --scratch-path /tmp/ep-rel`): 5 dylibs from
+Contents/Frameworks; the sandboxed import of the 1995 CD image gave 13 tables; table 1 classic
+reached game over (5,950,000), table 10 enhanced reached game over (13,220,000), both with rules
+direct; the xbrz + lighting snapshot was 960x720. A negative control (the same sandbox,
+`--data extracted`) fails with "missing .../extracted/tables/EP1/playfield_idx.npy", so the
+sandbox really hides the developer data.
 
 The app is ad-hoc signed, not notarized: after downloading, Gatekeeper wants right-click > Open.
 
@@ -184,11 +237,20 @@ The app is ad-hoc signed, not notarized: after downloading, Gatekeeper wants rig
   table's preview) and exits.
 * `--launcher --exit-after S --window-capture OUT.png` captures the launcher window;
   `--launcher --table N --autostart --exit-after S` goes through the picker into a game.
-* The smoke-test output adds the overlay state and the table's high-score count;
+* The smoke-test output adds `rules: direct|lifted|none (why)`, `render: filter …, hd pack
+  active|requested, none found|off, lighting …, interpolate …, full table …`, the overlay state and
+  the table's high-score count. When the main display is asleep or the session is locked (MTKView's
+  display link does not fire then), `--exit-after` runs drive the same `draw(in:)` from a 60 Hz timer
+  and say so;
   `EPIC_PINBALL_TEST_INITIALS=ABC` types those initials through the normal key path when the entry
   opens, e.g. `--table 1 --autopilot --balls 1 --mute --exit-after 60` plays a game to the end and
   records it.
 * Unit tests: `app/Tests/EpicPinballTests/FrontEndTests.swift` (settings merge / leniency / clamping,
   store persistence, bindings and modifier sides, high-score ranking / ties / capacity / damaged
   file, initials entry, PCX and ID decoding with synthetic files, library discovery, the folder
-  importer). They need a `EpicPinballTests` test target in Package.swift.
+  importer, the importer choice, the preview crop, `--original`) and
+  `testImportUsersCDImageIntoEmptySupportDir` (skipped without an `.iso` in the checkout): the
+  user's CD through `makeImporter` into an empty support directory, then `GameLibrary.locate` finds
+  it, the catalog has 13 available tables with names from IDn.DAT and 160x200 art, and tables 1, 8,
+  10 load with their rules from `<library>/original`. They run in the package's `EpicPinballTests`
+  target (`swift test --filter EpicPinballTests`, 27 tests).

@@ -240,6 +240,16 @@ public final class PinballRenderer {
     }
 
     static func shaderSource() throws -> String {
+        // Packaged .app first: SwiftPM's generated `Bundle.module` only knows the build machine's
+        // build tree (and calls fatalError when that is gone), so a release .app on another Mac
+        // must find the shader in its own Contents/Resources (tools/package_app.sh copies it there).
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            let packaged = [Bundle.main.url(forResource: "Pinball", withExtension: "metal"),
+                            Bundle.main.resourceURL?.appendingPathComponent("EpicPinball_PinballRender.bundle/Pinball.metal"),
+                            Bundle.main.resourceURL?.appendingPathComponent("EpicPinball_PinballRender.bundle/Contents/Resources/Pinball.metal")]
+            for case let u? in packaged { if let s = try? String(contentsOf: u, encoding: .utf8) { return s } }
+            throw RenderError.shaderSourceMissing
+        }
         guard let url = Bundle.module.url(forResource: "Pinball", withExtension: "metal"),
               let s = try? String(contentsOf: url, encoding: .utf8) else {
             throw RenderError.shaderSourceMissing

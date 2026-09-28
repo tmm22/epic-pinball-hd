@@ -21,13 +21,13 @@ struct LauncherView: View {
     /// Snapshot mode (`--launcher-snapshot`): plain stacks instead of scroll views so
     /// `ImageRenderer` draws everything.
     var staticLayout = false
-    static let columns = 4
+    static let columns = 5
 
     var body: some View {
         VStack(spacing: 0) {
             header
             HStack(alignment: .top, spacing: 20) {
-                grid
+                grid.frame(maxWidth: .infinity)
                 detail.frame(width: 340)
             }
             .padding(20)
@@ -71,11 +71,17 @@ struct LauncherView: View {
     private var detail: some View {
         VStack(alignment: .leading, spacing: 14) {
             if let t = model.selectedTable {
-                TablePreview(image: t.preview, vga: model.settings.frontEnd.pixelAspect == "vga")
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                Text(t.name).font(.system(size: 22, weight: .bold, design: .rounded))
-                Text("Table \(t.number)").font(.caption).foregroundStyle(Theme.dim)
-                if let p = t.problem { Text(p).font(.caption).foregroundStyle(.orange) }
+                HStack(alignment: .top, spacing: 14) {
+                    TablePreview(image: t.preview, vga: model.settings.frontEnd.pixelAspect == "vga")
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .frame(height: 220)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(t.name).font(.system(size: 22, weight: .bold, design: .rounded))
+                            .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                        Text("Table \(t.number)").font(.caption).foregroundStyle(Theme.dim)
+                        if let p = t.problem { Text(p).font(.caption).foregroundStyle(.orange) }
+                    }
+                }
                 HighScoreList(entries: model.highScores(t.number))
                 GameOptionsRow(settings: model.settings)
                 Button { model.play() } label: {
@@ -97,6 +103,12 @@ struct LauncherView: View {
 struct TablePreview: View {
     var image: CGImage?
     var vga: Bool
+    /// Width / height of the shown picture: the image's own shape (the table art is 160x200,
+    /// portrait), with VGA's 1.2x tall pixels when that pixel shape is chosen.
+    var aspect: CGFloat {
+        let w = CGFloat(image?.width ?? TableCatalog.selectScreenArtWidth), h = CGFloat(image?.height ?? 200)
+        return w / (h * (vga ? 1.2 : 1))
+    }
     var body: some View {
         ZStack {
             Rectangle().fill(Color.black)
@@ -106,7 +118,7 @@ struct TablePreview: View {
                 AppMark().opacity(0.25).padding(30)
             }
         }
-        .aspectRatio(vga ? 4.0 / 3.0 : 16.0 / 10.0, contentMode: .fit)
+        .aspectRatio(aspect, contentMode: .fit)
     }
 }
 
@@ -124,6 +136,7 @@ struct TableCard: View {
             HStack(alignment: .firstTextBaseline) {
                 Text("\(table.number)").font(.caption.monospacedDigit()).foregroundStyle(Theme.accent)
                 Text(table.name).font(.system(size: 13, weight: .semibold, design: .rounded)).lineLimit(1)
+                    .minimumScaleFactor(0.7).help(table.name)
             }
             Text(best.map { "\($0.initials)  \(formatScore($0.score))" } ?? (table.available ? "No scores yet" : "Not imported"))
                 .font(.caption.monospacedDigit()).foregroundStyle(Theme.dim).lineLimit(1)
@@ -164,11 +177,17 @@ struct GameOptionsRow: View {
         HStack {
             Picker("Players", selection: $settings.frontEnd.players) { ForEach(1...4, id: \.self) { Text("\($0)").tag($0) } }
                 .frame(width: 130)
-            Picker("Balls", selection: $settings.frontEnd.ballsPerGame) { ForEach([3, 5], id: \.self) { Text("\($0)").tag($0) } }
+            Picker("Balls", selection: $settings.frontEnd.ballsPerGame) { ForEach(ballChoices(settings.frontEnd.ballsPerGame), id: \.self) { Text("\($0)").tag($0) } }
                 .frame(width: 110)
         }
         .pickerStyle(.menu)
     }
+}
+
+/// The original's choices (3 or 5 balls), plus the stored value if it is another one
+/// (settings.json or `--balls` allow 1-9), so the picker never shows an empty selection.
+func ballChoices(_ current: Int) -> [Int] {
+    [3, 5].contains(current) ? [3, 5] : ([3, 5, current]).sorted()
 }
 
 func formatScore(_ s: UInt32) -> String {

@@ -120,6 +120,33 @@ final class EnhancedTableTests: XCTestCase {
         XCTAssertEqual(mf / mc, 1, accuracy: 0.15)
     }
 
+    /// Classic-feel flipper shots against the original on shots from real play: snapshots of the
+    /// ball 4 frames before each flipper shot in classic autoplay games, replayed from the same state
+    /// with the same inputs in both engines (EP1 and EP10; all 13 with EP_ENHANCED_GAMES=1). The
+    /// original's shots are nearly vertical (its top kick changes vx by a few units only), so the
+    /// direction must match closely; the speed is quantised by the original's once-per-step kicks.
+    func testClassicFeelFlipperShotsFromPlay() throws {
+        let tables = Self.env["EP_ENHANCED_GAMES"] == "1" ? Array(1...13) : [1, 10]
+        var ran = 0
+        for n in tables {
+            guard let e = try? rulesEngine(n) else { continue }
+            let (d, buf) = try data(n)
+            let snaps = EnhancedValidation.flipperShotSnapshots(engine: e, plunges: [42, 48, 54], frames: 4000)
+            let c = try EnhancedValidation.replayShots(data: d, buffer: buf, snapshots: snaps, config: nil)
+            let f = try EnhancedValidation.replayShots(data: d, buffer: buf, snapshots: snaps, config: .classicFeel)
+            let r = EnhancedValidation.compareShots(classic: c, enhanced: f)
+            print("EP\(n) classic feel flipper shots from play: \(r)")
+            guard r.shots >= 15 else { continue }
+            // EP11-13's top kick is only 0.75 px/step (p4 = 2), so more of their shots are side / tip
+            // kicks with larger vx; 77 EP12 shots from 9 games: median 5.2 deg, 18 shots: 13 deg.
+            XCTAssertLessThan(r.medianAngleDiff, n >= 11 ? 15 : 6, "EP\(n)")
+            XCTAssertLessThan(r.meanAbsLogSpeedRatio, 0.3, "EP\(n)")
+            XCTAssertEqual(r.enhancedMeanUp / r.classicMeanUp, 1, accuracy: 0.2, "EP\(n)")
+            ran += 1
+        }
+        if ran == 0 { throw XCTSkip("no tables with rules") }
+    }
+
     /// Full games with the rules in enhanced physics reach game over with the rules firing
     /// (sensor dispatches, score, sounds), on EP1 and EP10 (all 13 with EP_ENHANCED_GAMES=1). The
     /// player is `AutoPlayer` plus a rescue flip/nudge for a ball at rest outside the lane

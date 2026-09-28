@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import PinballCore
+import PinballImport
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
     FileHandle.standardError.write(Data("EpicPinball: \(message)\n".utf8))
@@ -24,18 +25,71 @@ do {
 if let d = options.supportDir {
     AppPaths.overrideRoot = URL(fileURLWithPath: (d as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
 }
+if let d = options.libraryDir {
+    AppPaths.libraryOverride = URL(fileURLWithPath: (d as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
+}
+// Process-wide switches read by PinballCore / PinballRender (RulesBackend.default, RenderSettings.fromEnvironment).
+if let b = options.rulesBackend { setenv("EPIC_PINBALL_RULES", b.rawValue, 1) }
+if let r = options.renderSpec { setenv("EPIC_PINBALL_RENDER", r, 1) }
 
-/// Data root for the headless modes and direct starts: `--data`, `$EPIC_PINBALL_DATA`, the
-/// developer `../extracted` candidates (as before), then the imported library (whose original
-/// files are then used unless `--original` is given).
+/// Data root for the headless modes and direct starts: `--data`; `--library`; `$EPIC_PINBALL_DATA`
+/// and (outside a packaged .app only) the developer `../extracted` candidates, as before; then the
+/// imported library. For an explicit `--data` and for a library the user's original files next
+/// to it (`<root>/original`) are used unless `--original` is given; the developer default keeps
+/// the loaders' own search order (so harness traces are unchanged).
 func resolveDataRoot(_ o: inout Options) -> URL {
-    do { return try DataLocator.resolve(explicit: o.dataDir) } catch {
-        if o.dataDir == nil, GameLibrary.hasTables(AppPaths.libraryRoot) {
-            let root = AppPaths.libraryRoot
-            if o.originalDir == nil { o.originalDir = GameLibrary.findOriginal(near: root, explicit: nil)?.path }
-            return root
+    func withOriginal(_ root: URL) -> URL {
+        if o.originalDir == nil { o.originalDir = GameLibrary.findOriginal(near: root, explicit: nil)?.path }
+        return root
+    }
+    if let d = o.dataDir {
+        return withOriginal(URL(fileURLWithPath: (d as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL)
+    }
+    let lib = AppPaths.libraryRoot
+    if o.libraryDir != nil {
+        guard GameLibrary.hasTables(lib) else {
+            fail("no imported tables in \(lib.path) (import them with --headless-import CD.iso --library \(lib.path))")
         }
-        fail("\(error)")
+        return withOriginal(lib)
+    }
+    var candidates: [URL] = []
+    if GameLibrary.runningFromAppBundle {
+        if let env = ProcessInfo.processInfo.environment["EPIC_PINBALL_DATA"], !env.isEmpty {
+            candidates.append(URL(fileURLWithPath: env, isDirectory: true).standardizedFileURL)
+        }
+    } else {
+        candidates = DataLocator.defaultCandidates()
+    }
+    var isDir: ObjCBool = false
+    for c in candidates where FileManager.default.fileExists(atPath: c.appendingPathComponent("tables").path, isDirectory: &isDir) && isDir.boolValue {
+        return c
+    }
+    if GameLibrary.hasTables(lib) { return withOriginal(lib) }
+    fail("\(AssetError.missingDataRoot(candidates + [lib]))\n(or import your CD first: EpicPinball --headless-import CD.iso)")
+}
+
+// `--headless-import SRC`: the first-launch import without a window (tests, packaging checks).
+if let src = options.headlessImport {
+    let u = URL(fileURLWithPath: (src as NSString).expandingTildeInPath).standardizedFileURL
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir) else { fail("\(u.path) does not exist") }
+    let source: ImportSource = isDir.boolValue ? .directory(u) : .isoImage(u)
+    let importer = makeImporter(for: source)
+    let destination = AppPaths.libraryRoot
+    let started = Date()
+    do {
+        for w in try importer.validate(source) { print("check: \(w)") }
+        let lastMessage = LockedString()
+        let lib = try importer.importGame(from: source, to: destination) { p in
+            guard lastMessage.swap(p.message) != p.message else { return }
+            print(String(format: "%3.0f%% %@", p.fraction * 100, p.message))
+        }
+        for w in lib.warnings { print("warning: \(w)") }
+        print("imported \(lib.tables.count) tables into \(lib.root.path) in \(String(format: "%.2f", Date().timeIntervalSince(started))) s: "
+              + lib.tables.map { "\($0.number) \($0.name)" }.joined(separator: ", "))
+        exit(lib.tables.isEmpty ? 1 : 0)
+    } catch {
+        fail("import failed: \(error)")
     }
 }
 
@@ -56,7 +110,7 @@ if headless {
     let engine: ClassicEngine
     do {
         assets = try TableAssets.load(dataRoot: dataRoot, table: options.table)
-        engine = try EngineAssets.makeEngine(dataRoot: dataRoot, table: options.table)
+        engine = try EngineAssets.makeEngine(dataRoot: dataRoot, table: options.table, originalDir: options.originalURL)
         if let gp = options.gravityPhase { engine.gravityPhase = gp }
     } catch {
         fail("\(error)")
@@ -98,7 +152,10 @@ let delegate: AppDelegate = MainActor.assumeIsolated {
         settings.frontEnd.showStrip = options.stripShown
         settings.frontEnd.players = options.players
         settings.frontEnd.ballsPerGame = options.balls
-        settings.game.fullTableView = false
+        settings.game.fullTableView = options.full
+        settings.game.useHDPack = options.hdPack
+        settings.game.dynamicLighting = options.lighting.map { $0 != .off } ?? false
+        settings.game.highRefresh = options.highRefreshFlag
         if let v = options.volume { settings.frontEnd.masterVolume = v }
     }
     let model = AppModel(settings: settings, scores: HighScoreStore())
@@ -110,7 +167,7 @@ let delegate: AppDelegate = MainActor.assumeIsolated {
         options = o
         do {
             let assets = try TableAssets.load(dataRoot: dataRoot, table: o.table)
-            let engine = try EngineAssets.makeEngine(dataRoot: dataRoot, table: o.table)
+            let engine = try EngineAssets.makeEngine(dataRoot: dataRoot, table: o.table, originalDir: o.originalURL)
             if let gp = o.gravityPhase { engine.gravityPhase = gp }
             start = .direct(dataRoot: dataRoot, assets: assets, engine: engine)
         } catch { fail("\(error)") }
@@ -137,3 +194,11 @@ let app = NSApplication.shared
 app.delegate = delegate
 app.setActivationPolicy(.regular)
 app.run()
+
+/// A string shared with the importer's progress callback (called from worker threads).
+final class LockedString: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = ""
+    /// Stores `new` and returns the previous value.
+    func swap(_ new: String) -> String { lock.lock(); defer { lock.unlock() }; let old = value; value = new; return old }
+}

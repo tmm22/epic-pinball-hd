@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 import PinballCore
 import PinballImport
@@ -306,8 +307,69 @@ final class CatalogTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: dest.appendingPathComponent("original/EP1.EXE").path))
         XCTAssertEqual(fractions.values.last, 1)
         XCTAssertEqual(fractions.values, fractions.values.sorted())
-        // An ISO or a plain folder goes to the library importer.
-        XCTAssertFalse(makeImporter(for: .isoImage(src.appendingPathComponent("x.iso"))) is ExtractedFolderImporter)
+        // An ISO or a plain folder goes to the library importer (PinballImport's Swift importer).
+        XCTAssertTrue(makeImporter(for: .isoImage(src.appendingPathComponent("x.iso"))) is GameDataImporter)
+        XCTAssertTrue(makeImporter(for: .directory(try tempDir())) is GameDataImporter)
+    }
+
+    func testTableArtCrop() throws {
+        func image(_ w: Int, _ h: Int) -> CGImage {
+            let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            return ctx.makeImage()!
+        }
+        let art = TableCatalog.tableArt(image(320, 200))
+        XCTAssertEqual([art.width, art.height], [160, 200])
+        let other = TableCatalog.tableArt(image(640, 480))
+        XCTAssertEqual([other.width, other.height], [640, 480])
+    }
+
+    func testOriginalURL() throws {
+        var o = try Options.parse(["--original", "~/x/original"])
+        XCTAssertEqual(o.originalURL?.path, (NSHomeDirectory() as NSString).appendingPathComponent("x/original"))
+        o = try Options.parse([])
+        XCTAssertNil(o.originalURL)
+    }
+
+    /// First launch, end to end: the user's CD image (if it is in the checkout) through the
+    /// importer the front end picks, into an empty support directory; then the launcher's
+    /// discovery finds the library and the catalog lists all 13 tables with names and art.
+    func testImportUsersCDImageIntoEmptySupportDir() throws {
+        let repo = URL(fileURLWithPath: #filePath).resolvingSymlinksInPath().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let iso = (try? FileManager.default.contentsOfDirectory(at: repo, includingPropertiesForKeys: nil))?
+            .first { $0.pathExtension.lowercased() == "iso" }
+        guard let iso else { throw XCTSkip("no CD image in \(repo.path)") }
+        let support = try tempDir()
+        defer { try? FileManager.default.removeItem(at: support) }
+        AppPaths.overrideRoot = support
+        defer { AppPaths.overrideRoot = nil }
+        XCTAssertFalse(GameLibrary.hasTables(AppPaths.libraryRoot))
+
+        let imp = makeImporter(for: .isoImage(iso))
+        XCTAssertTrue(imp is GameDataImporter)
+        _ = try imp.validate(.isoImage(iso))
+        let fractions = LockedArray()
+        let lib = try imp.importGame(from: .isoImage(iso), to: AppPaths.libraryRoot) { fractions.append($0.fraction) }
+        XCTAssertEqual(lib.tables.count, TableGeometry.tableCount)
+        XCTAssertEqual(fractions.values.last, 1)
+
+        let found = try XCTUnwrap(GameLibrary.locate(explicitData: nil, explicitOriginal: nil))
+        XCTAssertEqual(found.origin, .library)
+        XCTAssertEqual(found.dataRoot.standardizedFileURL.path, AppPaths.libraryRoot.standardizedFileURL.path)
+        XCTAssertEqual(found.originalDir?.lastPathComponent, "original")
+        let tables = TableCatalog.load(found)
+        XCTAssertEqual(tables.filter(\.available).count, TableGeometry.tableCount)
+        for t in tables {
+            XCTAssertNotEqual(t.name, "Table \(t.number)", "table \(t.number) has no name from ID\(t.number).DAT")
+            XCTAssertEqual(t.preview.map { [$0.width, $0.height] }, [160, 200], "table \(t.number) preview")
+        }
+        // Every table's engine (and its rules, from <library>/original) loads from the library.
+        for n in [1, 8, 10] {
+            let e = try EngineAssets.makeEngine(dataRoot: found.dataRoot, table: n, originalDir: found.originalDir)
+            XCTAssertNil(e.rulesLoadError, "table \(n)")
+            XCTAssertNotNil(e.rules, "table \(n)")
+        }
     }
 }
 

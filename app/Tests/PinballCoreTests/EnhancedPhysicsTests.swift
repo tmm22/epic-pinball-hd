@@ -163,6 +163,38 @@ final class EnhancedPhysicsTests: XCTestCase {
         XCTAssertEqual(m.ballCentre(0)!.y, 50 + m.centreOffset.y + 1, accuracy: 1e-6)
     }
 
+    /// The main loop's order is gravity, then the sensor scan (rule code). A kick-out hole holds
+    /// the ball by writing v = 0 after the gravity: the held ball must not creep (the gravity of that
+    /// frame is overridden, as in the original), the rules see the classic `vy` (with the gravity),
+    /// and a plunger-style delta written before the gravity survives it.
+    func testRuleVelocityWritesAfterGravity() throws {
+        let e = try floorEngine()
+        let m = EnhancedPhysics.install(on: e)
+        e.balls[0] = BallState(x: 100, y: 100)
+        m.step(e)
+        let c0 = try XCTUnwrap(m.ballCentre(0))
+        for _ in 0..<90 {
+            XCTAssertTrue(m.frameGravity(e, ball: 0, amount: 5))
+            XCTAssertEqual(e.balls[0].vy, 5, "the scan sees the gravity like the original")
+            e.balls[0].vx = 0; e.balls[0].vy = 0   // the hold
+            for _ in 0..<3 { m.step(e) }
+        }
+        XCTAssertEqual(m.ballCentre(0)!, c0)
+        XCTAssertEqual(m.ballVelocity(0)!, SIMD2(0, 0))
+        // Release: vy -= 600 before this frame's gravity.
+        e.balls[0].vy &-= 600
+        _ = m.frameGravity(e, ball: 0, amount: 5)
+        XCTAssertEqual(e.balls[0].vy, -595)
+        for _ in 0..<3 { m.step(e) }
+        XCTAssertEqual(m.ballVelocity(0)!.y, -595.0 / 128, accuracy: 1e-9)
+        // An eject that sets an absolute velocity after the gravity gets exactly that velocity.
+        _ = m.frameGravity(e, ball: 0, amount: 5)
+        e.balls[0].vx = 30; e.balls[0].vy = 100
+        for _ in 0..<3 { m.step(e) }
+        XCTAssertEqual(m.ballVelocity(0)!.x, 30.0 / 128, accuracy: 1e-9)
+        XCTAssertEqual(m.ballVelocity(0)!.y, 100.0 / 128, accuracy: 1e-9)
+    }
+
     /// A ball far faster than anything in the game (40 px/step, one substep) against a 1-px wall:
     /// conservative advancement stops it at the wall.
     func testNoTunnellingThroughThinWallAtExtremeSpeed() throws {

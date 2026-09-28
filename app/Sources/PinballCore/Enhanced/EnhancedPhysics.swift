@@ -91,6 +91,10 @@ public final class EnhancedPhysics: BallPhysics {
         var nudgedThisStep = false
         var bigHitThisStep = false
         var ruleTimerThisStep = false
+        /// `classicKick`: substep counter of the last side / top kick (at most one per classic
+        /// step's worth of substeps, like the original's once-per-step responses).
+        var lastSideKick = Int.min / 2
+        var lastTopKick = Int.min / 2
         /// Kicker pixels switched on (EP2's position window) while the ball overlapped them: they
         /// stay intangible for this ball until it is clear of them.
         var activeGhost = false
@@ -119,6 +123,11 @@ public final class EnhancedPhysics: BallPhysics {
     var alphaStart: [Double] = []
     var alphaEnd: [Double] = []
     var alphaNow: [Double] = []
+    /// `classicKick`: groups whose flipper counts as moving up for the kick this step. The original
+    /// tests the `moving` flag its previous step's `flipper_update` left (so a flipper that has just
+    /// reached the top still kicks for one step); the continuous flipper here already moves during
+    /// the step, so both this step's motion and the flag count.
+    var kickMoving: [Bool] = []
     var subIndex = 0
 
     // Classic response tables.
@@ -169,6 +178,7 @@ public final class EnhancedPhysics: BallPhysics {
         alphaStart = e.groups.map { Double($0.angle) }
         alphaEnd = alphaStart
         alphaNow = alphaStart
+        kickMoving = alphaStart.map { _ in false }
         updateRadii()
         rebuildWorld(e)
     }
@@ -298,8 +308,15 @@ public final class EnhancedPhysics: BallPhysics {
 
     // MARK: - BallPhysics
 
+    /// The main loop's gravity. The integer `vy` gets it at once, exactly like the original, so the
+    /// sensor scan and rule code that run right after it see the same `vy` as in the classic engine
+    /// and a rule that *sets* the velocity (a kick-out hole holding the ball at `v = 0`, an eject)
+    /// overrides it just as there. The body receives the same amount spread over the frame's
+    /// substeps; `syncIn` applies only what the rules changed on top of it.
     public func frameGravity(_ e: ClassicEngine, ball i: Int, amount: Int16) -> Bool {
-        guard bodies[i].active else { return false }   // not simulated here: the integer add
+        guard bodies[i].active, bodies[i].written != nil else { return false }   // not simulated here: the integer add
+        e.balls[i].vy &+= amount
+        bodies[i].written?.vy &+= amount   // earlier main-loop changes (plunger release) stay visible to syncIn
         let g = Double(amount) / 128 * config.gravityScale
         bodies[i].gravityBudget += g
         bodies[i].gravityRate = g / Double(e.data.timing.stepsPerFrame * max(1, config.substeps))
@@ -314,8 +331,10 @@ public final class EnhancedPhysics: BallPhysics {
         // The flippers move by one angle index per step exactly as in the original (sounds,
         // outlines, sprites); the physics sees them rotate continuously during the step.
         alphaStart = e.groups.map { Double($0.angle) }
+        let movedLastStep = e.groups.map { $0.moving }
         e.flipperUpdate()
         alphaEnd = e.groups.map { Double($0.angle) }
+        kickMoving = zip(movedLastStep, zip(alphaStart, alphaEnd)).map { $0 || $1.1 < $1.0 }
         syncIn(e)
         for i in 0..<5 {
             bodies[i].onFlipper = false
@@ -366,7 +385,14 @@ public final class EnhancedPhysics: BallPhysics {
         } else if let w = b.written {
             if s.x != w.x || s.y != w.y || s.accx != w.accx || s.accy != w.accy { b.c = centre(of: s) }
             if s.vx != w.vx { b.v.x = s.vx == 0 ? 0 : b.v.x + Double(Int(s.vx) - Int(w.vx)) / 128 }
-            if s.vy != w.vy { b.v.y = s.vy == 0 ? 0 : b.v.y + Double(Int(s.vy) - Int(w.vy)) / 128 }
+            if s.vy != w.vy {
+                if s.vy == 0 {
+                    b.v.y = 0            // set by rule code: overrides this frame's gravity too
+                    b.gravityBudget = 0
+                } else {
+                    b.v.y += Double(Int(s.vy) - Int(w.vy)) / 128
+                }
+            }
             if s.x != w.x || s.y != w.y || s.vx != w.vx || s.vy != w.vy { b.stillSteps = 0 }   // rule code moves it
         }
         b.layer = s.layer
@@ -675,13 +701,24 @@ public final class EnhancedPhysics: BallPhysics {
         // Velocity safety cap (magnitude).
         let sp = (b.v * b.v).sum().squareRoot()
         if sp > config.speedCap { b.v *= config.speedCap / sp }
-        // The original's edge clamps (cs:17A8.. / cs:1813), as a last resort.
+        // The original's edge clamps (cs:17A8.. / cs:1813), as a last resort: only where the
+        // clamped position is free (the table border is a wall here, so a ball within 2 px of the
+        // top edge is legal; EP8's y reset would put it into the top corners' walls).
         let ig = e.data.integration
         var t = b.c - centreOffset
-        if let mx = ig.maxX, t.x > Double(mx) + 1 { t.x = Double(mx); stats.edgeClamps += 1 }
-        if t.x < Double(ig.minX) { t.x = Double(ig.minXSet ?? ig.minX); stats.edgeClamps += 1 }
-        if t.y < Double(ig.minY) && b.v.y < 0 { t.y = Double(ig.yReset); b.v.y = 0; stats.edgeClamps += 1 }
-        b.c = t + centreOffset
+        let t0 = t
+        var clampVy = false
+        if let mx = ig.maxX, t.x > Double(mx) + 1 { t.x = Double(mx) }
+        if t.x < Double(ig.minX) { t.x = Double(ig.minXSet ?? ig.minX) }
+        if t.y < Double(ig.minY) && b.v.y < 0 { t.y = Double(ig.yReset); clampVy = true }
+        if t != t0 {
+            bodies[i] = b
+            if isFree(e, i, t + centreOffset) {
+                b.c = t + centreOffset
+                if clampVy { b.v.y = 0 }
+                stats.edgeClamps += 1
+            }
+        }
         if !(b.c.x.isFinite && b.c.y.isFinite && b.v.x.isFinite && b.v.y.isFinite && b.spin.isFinite) {
             (b.c, b.v) = b.lastGood
             b.spin = 0
@@ -953,6 +990,37 @@ public final class EnhancedPhysics: BallPhysics {
         case let .flipper(fi):
             b.onFlipper = true
             bodies[i].onFlipper = true
+            let fg = flippers[fi].group
+            if config.flipperResponse == .classicKick {
+                if kickMoving[fg] {
+                    // The original kicks on contact alone (its outline jumps into the ball), not only
+                    // on approach.
+                    stats.flipperImpacts += 1
+                    classicFlipperKick(e, i, &b, c)
+                    // Like the original, the outline pushes the ball out by position only (the
+                    // contact resolution moves it); velocity comes from the kicks alone. The ball's
+                    // own motion into the surface is stopped.
+                    let own = (b.v * n).sum()
+                    if own < 0 { b.v -= own * n }
+                    log(flipper: UInt8(1 + (fg % 2)))
+                } else {
+                    // Not moving up: the original treats the outline like any wall (flipper_contact 0).
+                    guard vn < 0 else { return }
+                    stats.flipperImpacts += 1
+                    refreshClassicMaps(e)
+                    let m = classicMapFor(n, level: b.layer == 1 ? 1 : 0)
+                    if -vn < config.restingSpeed {
+                        b.v -= vn * n
+                    } else {
+                        b.v += SIMD2(m.x * b.v.x + m.y * b.v.y, m.z * b.v.x + m.w * b.v.y)
+                    }
+                    let after = ((b.v - c.surfaceVelocity) * n).sum()
+                    if after < 0 { b.v -= after * n }
+                    log()
+                }
+                bodies[i] = b
+                return
+            }
             guard vn < 0 else { return }
             stats.flipperImpacts += 1
             let e0 = -vn < config.restingSpeed ? 0 : config.flipperRestitution
@@ -965,6 +1033,66 @@ public final class EnhancedPhysics: BallPhysics {
             log(flipper: moving ? UInt8(1 + (g % 2)) : 0)
         }
         bodies[i] = b
+    }
+
+    /// `flipperKickWindow` in substeps.
+    var kickWindow: Int { max(1, Int((config.flipperKickWindow * Double(max(1, config.substeps))).rounded())) }
+
+    /// `FlipperResponse.classicKick`: the original's moving-flipper branch of collision_response
+    /// (cs:1AF3..1BB0, `ClassicEngine.collisionResponse`) for the smooth contact `c`. The contact
+    /// direction is the one the original's probe ring would report for this surface normal.
+    /// * side / tip range (and ball y at or below `side_min_y`): `v += n[side|tip] * (p5, p6)` per
+    ///   push-out iteration, `vy` zeroed first when `vy >= vy_zero_side`. The original pushes the ball
+    ///   up 1 px per iteration until the outline is clear, i.e. about one iteration per pixel the
+    ///   flipper and ball closed in this step: here `ceil(approach / |n.y|)` (1 ... 6) iterations,
+    ///   at most once per `flipperKickWindow`.
+    /// * otherwise, at most once per `flipperKickWindow` (the original's first response, once per
+    ///   step; a rolling window, so a flipper that catches the ball again later in the same step kicks
+    ///   it like the original's next step would): the upper-flipper kick above
+    ///   `top_min_y` (EP4, EP12), else the top kick `vy = 0 if vy >= vy_zero_top; vx += -+fx[a] p3;
+    ///   vy -= fy[a] p4` with the contact side's flipper angle before this step's update.
+    func classicFlipperKick(_ e: ClassicEngine, _ i: Int, _ b: inout Body, _ c: Contact) {
+        let fk = e.data.flipperKick, r = fk.ranges, p = e.params
+        let n = c.normal
+        let k = Int(classicDir(n)) - 1
+        let t = b.c - centreOffset
+        let bx = UInt16(truncatingIfNeeded: Int(t.x.rounded(.down))), by = UInt16(truncatingIfNeeded: Int(t.y.rounded(.down)))
+        let gateOK = fk.sideMinY.map { by >= UInt16(truncatingIfNeeded: $0) } ?? true
+        if gateOK {
+            var kp: Int?
+            if k > r.sideMax { kp = k > r.topMax ? r.tipIndex : nil } else { kp = k < r.lo ? r.tipIndex : r.sideIndex }
+            if let kp {
+                guard stats.substeps - b.lastSideKick >= kickWindow else { return }
+                b.lastSideKick = stats.substeps
+                let approach = -((b.v - c.surfaceVelocity) * n).sum()
+                let iters = Double(min(6, max(1, Int((approach / max(0.3, abs(n.y))).rounded(.up)))))
+                if b.v.y * 128 >= Double(fk.vyZeroSide) { b.v.y = 0 }
+                b.v += iters * SIMD2(tableNormals[kp].x * Double(p[5]), tableNormals[kp].y * Double(p[6])) / 128
+                return
+            }
+        }
+        guard stats.substeps - b.lastTopKick >= kickWindow else { return }
+        b.lastTopKick = stats.substeps
+        let map = e.data.flipperMap
+        let left = bx <= UInt16(truncatingIfNeeded: e.data.collision.flipperContactSplitX)
+        if let top = fk.topMinY, by < UInt16(truncatingIfNeeded: top), let uk = fk.upperKick {
+            let side: EngineData.FlipperKick.UpperKick.Side
+            if let sx = uk.splitX, let l = uk.left, bx < UInt16(truncatingIfNeeded: sx) { side = l } else { side = uk.right }
+            let a = min(side.vxSub.count - 1, side.vySub.count - 1, max(0, Int(alphaStart[side.angleGroup].rounded())))
+            if b.v.y > 0 { b.v.y = 0 }
+            b.v -= SIMD2(Double(side.vxSub[a]), Double(side.vySub[a])) / 128
+            if !b.ruleTimerThisStep, let rt = side.ruleTimer, let addr = ClassicEngine.hexAddr(rt.var) {
+                b.ruleTimerThisStep = true
+                e.dsWrite(addr, rt.size, rt.value)
+            }
+            return
+        }
+        let g = left ? map.contact1Angle : map.contact2Angle
+        let a = min(fk.fx.count - 1, max(0, Int(alphaStart[g].rounded())))
+        if b.v.y * 128 >= Double(fk.vyZeroTop) { b.v.y = 0 }
+        let dvx = Double(fk.fx[a]) * Double(p[3]) / 128
+        b.v.x += left ? dvx : -dvx
+        b.v.y -= Double(fk.fy[a]) * Double(p[4]) / 128
     }
 
     /// Kicks a ball that has sat still for `ballSearchSeconds` (see `EnhancedPhysicsConfig`).

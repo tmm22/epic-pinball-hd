@@ -275,3 +275,71 @@ extension RulesDirectTests {
         XCTAssertEqual(r.warnings, [])
     }
 }
+
+extension RulesDirectTests {
+    /// Every scenario of the differential suite (the sets tools/emu/run_suite.py runs, all 13 tables)
+    /// in rules and full mode, through `TraceRunner` with `state` on, once per backend: the traces
+    /// (ball records, all 5 slots, counters, the data-segment changes after every frame and every
+    /// sfx_play / dmd_message call with its registers) must be identical. Only the lifted
+    /// backend's block coverage (`blk`) is left out: the direct backend has no blocks.
+    /// `EP_SUITE_TABLES=1,5` limits the tables; `EP_SUITE_SCENARIOS=N` the scenario files per table
+    /// (default 4, `all` = the whole suite: 830 runs, about 8 minutes in a debug build).
+    func testLiftedAndDirectBackendsAgreeOnTheSuiteScenarios() throws {
+        let limitEnv = ProcessInfo.processInfo.environment["EP_SUITE_SCENARIOS"]
+        let limit = limitEnv == "all" ? Int.max : (limitEnv.flatMap(Int.init) ?? 4)
+        let fm = FileManager.default
+        let sc = Self.project.appendingPathComponent("tools/emu/scenarios")
+        let tables = ProcessInfo.processInfo.environment["EP_SUITE_TABLES"].map { $0.split(separator: ",").compactMap { Int($0) } } ?? Array(1...13)
+        func files(_ d: URL) -> [URL] {
+            ((try? fm.contentsOfDirectory(at: d, includingPropertiesForKeys: nil)) ?? [])
+                .filter { $0.pathExtension == "json" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        }
+        let blk = try NSRegularExpression(pattern: #","blk":\[[^\]]*\]"#)
+        func strip(_ s: String) -> String {
+            blk.stringByReplacingMatches(in: s, range: NSRange(s.startIndex..., in: s), withTemplate: "")
+        }
+        var runs = 0, frames = 0, lines: [String] = []
+        for n in tables {
+            guard fm.fileExists(atPath: RulesRuntime.rulesURL(dataRoot: Self.dataRoot, table: n).path),
+                  let exe = Self.exe(n) else { continue }
+            var dirs = n == 1 ? [sc, Self.project.appendingPathComponent("tools/emu/scenarios_pathological"), sc.appendingPathComponent("EP1")]
+                              : [sc.appendingPathComponent("EP\(n)")]
+            if n != 1 { dirs += ["hand", "extra"].map { sc.appendingPathComponent("EP\(n)/\($0)") } }
+            let (data, buf) = try EngineAssets.load(dataRoot: Self.dataRoot, table: n)
+            // one load per backend; every scenario gets a fresh runtime from the same program
+            let lifted = try RulesRuntime.load(dataRoot: Self.dataRoot, table: n, backend: .lifted)
+            let direct = try RulesRuntime.direct(exe: exe, table: n)
+            func engine(_ proto: RulesRuntime) throws -> ClassicEngine {
+                let e = try ClassicEngine(data: data, startBuffer: buf)
+                let r = try RulesRuntime(program: proto.program, exe: exe)
+                r.x86.playfieldSegmentVars = proto.x86.playfieldSegmentVars
+                r.attach(to: e, mode: .off)
+                return e
+            }
+            var tRuns = 0, tFrames = 0, bad = 0
+            for u in dirs.flatMap(files).prefix(limit) {
+                for mode in ["rules", "full"] {
+                    var s = try Scenario.load(contentsOf: u)
+                    s.table = n
+                    s.mode = mode
+                    let a = try engine(lifted), b = try engine(direct)
+                    let ta = strip(TraceRunner.run(s, engine: a, state: true))
+                    let tb = strip(TraceRunner.run(s, engine: b, state: true))
+                    tRuns += 1
+                    tFrames += ta.split(separator: "\n").count / max(1, data.timing.stepsPerFrame)
+                    if ta != tb {
+                        bad += 1
+                        let la = ta.split(separator: "\n"), lb = tb.split(separator: "\n")
+                        let i = (0..<min(la.count, lb.count)).first { la[$0] != lb[$0] } ?? min(la.count, lb.count)
+                        XCTFail("EP\(n) \(u.lastPathComponent) \(mode): record \(i) differs\n lifted \(i < la.count ? String(la[i].prefix(600)) : "-")\n direct \(i < lb.count ? String(lb[i].prefix(600)) : "-")")
+                    }
+                    XCTAssertEqual(b.rules!.warnings, [], "EP\(n) \(u.lastPathComponent) direct warnings")
+                }
+            }
+            runs += tRuns; frames += tFrames
+            lines.append("EP\(n): \(tRuns - bad)/\(tRuns) runs identical, \(tFrames) frames")
+        }
+        if runs == 0 { throw XCTSkip("no user tables with rules.json") }
+        print(lines.joined(separator: "\n") + "\nsuite scenarios, lifted vs direct: \(runs) runs, \(frames) frames")
+    }
+}

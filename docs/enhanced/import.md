@@ -179,14 +179,22 @@ EOF
 
 ## Rules
 
-`rules.json` comes from `tools/rules.py` (2,700 lines of lifting) and is not ported: another track
-runs the rules directly from the EXE. The importer copies `tables/EPn/rules.json` when a rules
-source is available (`ImportOptions.rules`, default: the developer `extracted/` if present) and
-records `"rules": "rules.json"`; otherwise it records `"direct-exe"` and warns. At HEAD,
-`RulesRuntime.load` requires `rules.json`, so a `direct-exe` table plays physics only until the
-direct-execution path lands. What that path needs from the library: `original/EPn.EXE` (copied)
-and `tables/EPn/collision.json` `collision_buffer.top_seg_var` / `bottom_seg_var` (written), both
-already there.
+`rules.json` comes from `tools/rules.py` (2,700 lines of lifting) and is not ported. The app's
+default rules backend is now the direct one (`RulesBackend.direct`, docs/enhanced/rules-direct.md):
+`RulesRuntime.load` finds and runs the rule code in `EPn.EXE` and needs no `rules.json`; it
+falls back to `rules.json` (with a warning) only if the discovery fails, and
+`EPIC_PINBALL_RULES=lifted` selects the lifted backend. So:
+
+* The importer records `"rules": "direct-exe"` for a table without `rules.json`; this is the normal
+  case for users and is not a warning.
+* With `ImportOptions.rules` `.automatic` (default: the developer `extracted/`, if present) or
+  `.copy(from: dir)`, `tables/EPn/rules.json` is copied and recorded as `"rules": "rules.json"`,
+  but only if it was lifted from the same EXE: `rules.json` holds EXE addresses and no hash, so when
+  `<dir>/../original/EPn.EXE` exists it must be byte-identical to the imported `EPn.EXE`; otherwise
+  it is skipped with a warning (and the table uses the direct backend).
+* What the direct backend reads from the library: `original/EPn.EXE` (found by
+  `RulesRuntime.locateEXE` via `<dataRoot>/original`). The lifted backend also reads
+  `tables/EPn/collision.json` `collision_buffer.top_seg_var` / `bottom_seg_var`. Both are written.
 
 ## Parity
 
@@ -208,25 +216,41 @@ All in `app/Tests/PinballImportTests` (they skip cleanly when the user's data is
   a disc image in a folder, missing and extra tables (built from symlinks, nothing copied).
 * `DecoderParityTests` (needs `.venv` with capstone), unit tests for the regex engine, decoder
   spelling, JSON/NPY writers, and synthetic ISO images (2048 and raw 2352 Mode 2 sectors).
+* `PaletteSearchTests`: the bounded preview-match palette search (EP9-13) returns the same offset as
+  the literal full scan, on 40 synthetic inputs (small alphabets, ties, planted partial copies,
+  all-zero data) and on the user's EP9.EXE with the real and a non-matching reference.
 
-App-level check (the committed app, built separately from the working tree): all 413 scenarios
-in `tools/emu/scenarios` traced with `--data <library> --original <library>/original` give
-records identical to `--data extracted` (208,128 records), and snapshots of EP1/4/8/10/12
-with lamps, score and a launched ball are byte-identical PNGs. `$EPIC_PINBALL_ORIGINAL` had to
-be set for the rules (see Loader notes).
+App-level check (`scratch/importer/lib_vs_extracted.py`, 2026-09-28, app at HEAD with the default
+direct rules backend): a library imported from the CD image, then every scenario in
+`tools/emu/scenarios` (413) in physics, rules and full mode traced with `--data <library>` and with
+`--data extracted`, `EPIC_PINBALL_*` unset and no `--original`: **1,239 of 1,239 traces
+byte-identical** (624,960 records); the rules find `original/EPn.EXE` inside the library.
+Snapshots of EP1/4/8/10/12 (`--lamps a --score 12345670 --launch --sim-time 1.5`) are byte-identical
+PNGs with `--data <library> --original <library>/original`; without `--original` the headless
+snapshot does not find the EXE for the presentation (see Loader notes).
 
 ## Performance
 
 Full import of all 13 tables from the CD image (read, copy 6.4 MB of originals, extract, write
-36 MB): 0.7-0.9 s in a release build, about 4 s in a debug build (tests), on 8 cores.
+36 MB), 8 cores: about 2.1 s in a debug build (tests, `DevLibraryTests`), 0.73 s in a
+release build. The slowest step used to be the EP9-13 palette search (extract.py's sliding
+preview match: 60 probes at every file offset, 3.6-5.3 s per table in debug); it now takes a lower
+bound from the offsets whose first two probes match and stops counting an offset once it cannot
+reach it (exact, see `PaletteSearchTests`), 0.02-0.2 s per table in debug.
 
 ## Loader notes (other tracks)
 
-* `EngineAssets.makeEngine` is called without `originalDir` in `main.swift`, `App.swift` and
-  `TraceMode.swift`, so `RulesRuntime.locateEXE` only finds the EXE in `$EPIC_PINBALL_ORIGINAL` or
-  `<dataRoot>/../original`. With the library as data root the originals are in
-  `<dataRoot>/original`: pass `originalDir`, or add `<dataRoot>/original` to the candidates of
-  `RulesRuntime.locateEXE`, `TableExe.locate` and `OriginalDataLocator` (the audio). Without that,
-  a table from the library runs without its rules unless `--original` / the environment is set.
-* `DataLocator.defaultCandidates` does not include `LibraryLocation.defaultRoot`
-  (GameLibrary in the front end does).
+State after integration (2026-09-28), all resolved:
+
+* Rules: `RulesRuntime.locateEXE` includes `<dataRoot>/original`.
+* Window app: `GameLibrary` (TableCatalog.swift) finds `<root>/original` and App.swift passes it as
+  `originalDir`.
+* Headless / direct starts: `resolveDataRoot` (main.swift) fills `originalDir` with
+  `GameLibrary.findOriginal(near:)` for an explicit `--data`, `--library` and the imported library
+  (not for the developer `extracted/` candidates, so harness traces keep the old search order).
+* `TableExe.locate` (PinballRender) now also tries `<dataRoot>/original`, and
+  `OriginalDataLocator.candidates` (PinballAudio) `$EPIC_PINBALL_DATA/original`.
+* The app imports with `ImportOptions(rules: .none)` (ImporterHookup.swift): libraries never carry
+  a lifted rules.json, the rules run from the copied EXE.
+* `--headless-import SRC [--library DIR]` runs this importer without a window; the packaging
+  script's runtime check uses it from the packaged binary (docs/enhanced/frontend.md, Packaging).

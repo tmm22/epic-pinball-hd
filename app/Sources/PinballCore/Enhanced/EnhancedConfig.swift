@@ -22,6 +22,19 @@ public struct EnhancedPhysicsConfig: Sendable, Equatable, Codable {
         case restitution
     }
 
+    /// How a flipper that is moving up changes the ball's velocity.
+    public enum FlipperResponse: String, Sendable, Codable {
+        /// Impulse against the flipper's surface velocity `omega x r` at the contact point
+        /// (`flipperGain`, `flipperRestitution`, `flipperFriction`): physically based.
+        case impulse
+        /// The original's flipper kicks (cs:1AF3..1BB0) driven by the smooth contact: the contact
+        /// normal selects the original's contact direction, which picks the top kick
+        /// (`vy -= fy[angle] * p4`, once per step: the nearly vertical shot that defines the original's
+        /// feel) or the side / tip kick along its fixed normals (scaled by the approach depth the
+        /// original's per-pixel push-out loop would see). A flipper that is not moving up is a wall.
+        case classicKick
+    }
+
     public var preset: Preset
     /// Substeps per classic physics step (8 -> 1438.6 Hz, 10 -> 1798 Hz). Deterministic fixed dt.
     public var substeps: Int
@@ -48,6 +61,12 @@ public struct EnhancedPhysicsConfig: Sendable, Equatable, Codable {
     /// Scale on the flipper surface velocity used for the impulse (the geometry always moves at
     /// the original's 1 angle per step). 1 = purely kinematic.
     public var flipperGain: Double
+    public var flipperResponse: FlipperResponse = .impulse
+    /// `classicKick`: shortest time between two kicks of the same ball, in classic steps. The
+    /// original kicks at most once per step, but its outline jumps a whole angle at the end of the
+    /// step while this flipper sweeps continuously; 0.75 fits the original's shot speeds best over
+    /// paired replays of real play on all 13 tables (docs/enhanced/physics.md).
+    public var flipperKickWindow: Double = 0.75
     /// Scale on the kicker (bumper/slingshot) impulse `kick * |n|`.
     public var kickerScale: Double
     /// Kick along the table's elliptical normal (classic) or the smooth wall normal.
@@ -77,13 +96,17 @@ public struct EnhancedPhysicsConfig: Sendable, Equatable, Codable {
     /// Spin coupling at contacts (0..1): fraction of the slip removed per impact.
     public var spinCoupling: Double
 
-    public static let classicFeel = EnhancedPhysicsConfig(
+    public static let classicFeel: EnhancedPhysicsConfig = {
+        var c = EnhancedPhysicsConfig(
         preset: .classicFeel, substeps: 8, contactPadding: 0, ballRadius: 7.0,
         wallResponse: .classicMap, wallRestitution: 0.18, wallFriction: 0,
-        restingSpeed: 0.06, flipperRestitution: 0.25, flipperFriction: 0.0, flipperGain: 1.3,
+        restingSpeed: 0.06, flipperRestitution: 0.25, flipperFriction: 0.0, flipperGain: 1.0,
         kickerScale: 1.0, kickerAlongTableNormal: true, kickerRestitution: 0,
         ballBallRestitution: 0.45, classicAxisCaps: true, speedCap: 10,
         rollingDrag: 0, gravityScale: 1, spin: false, spinCoupling: 0)
+        c.flipperResponse = .classicKick
+        return c
+    }()
 
     public static let modern = EnhancedPhysicsConfig(
         preset: .modern, substeps: 10, contactPadding: 0, ballRadius: 7.0,

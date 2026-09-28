@@ -2,13 +2,21 @@
 
 A Swift package that plays the tables from **your own copy** of Epic Pinball with a
 faithful, integer-exact reimplementation of the original engine, rendered with Metal.
-No game data is bundled or copied into `app/`. Everything, including small numeric
-tables (probe ring, normal and push-out tables, parameter block, flipper outlines), is
-loaded at runtime from `extracted/` files that you produce from your own CD.
+No game data is bundled or copied into `app/` or the packaged `.app`. Everything, including
+small numeric tables (probe ring, normal and push-out tables, parameter block, flipper
+outlines), is loaded at runtime from a per-user library that the app's Swift importer builds
+from your CD image or install (`~/Library/Application Support/EpicPinballHD/Library`), or from
+the developer `extracted/` directory made by the Python tools.
+
+There are two ways to play: **classic** (the bit-exact original, the default) and the
+**enhanced version** (Epic Pinball HD: launcher, settings, high scores, controller support,
+enhanced physics, HD rendering). The enhanced version is documented in
+[docs/enhanced/README.md](../docs/enhanced/README.md).
 
 Status:
 * **Every table plays a full game**: the original engine (integer-exact physics), the table's own rules
-  (lifted to `rules.json` by `tools/rules.py`, plus the unlifted pieces executed from your EXE), the original
+  (by default executed straight from your EPn.EXE by `MiniX86`, found at run time: docs/enhanced/rules-direct.md;
+  the older lifted `rules.json` from `tools/rules.py` is optional, `--rules lifted`), the original
   320x240 presentation (lamps, strip, score, dot messages, EP8's palette ring) and audio (SFXn.PIN effects at
   the original's live pitch, SONGn.PSM music through libopenmpt), at the original's 59.94 frames/s.
 * **Checked against the original machine code** (the Unicorn harness in `tools/emu/`, which boots your own
@@ -24,8 +32,13 @@ Status:
 
 - macOS 14 or later on Apple silicon (tested with Swift 6.3 / Xcode 26.6)
 - Swift toolchain (Xcode or Command Line Tools). The shader is compiled at runtime, so
-  you do not need the offline Metal compiler.
-- Extracted data for each table under `extracted/tables/EP<n>/`:
+  you do not need the offline Metal compiler. `libopenmpt` (Homebrew) for music.
+- Your game files, either way:
+  - **No Python needed:** import your CD image or install with the app (first launch opens the
+    import screen), or headless: `EpicPinball --headless-import CD.iso [--library DIR]`. The Swift
+    importer (docs/enhanced/import.md) writes the same files the Python tools do (checked byte for
+    byte on all 13 tables) plus a copy of your original files, into the library.
+  - **Developer layout:** extracted data for each table under `extracted/tables/EP<n>/`:
   - `playfield_idx.npy`, `palette.json` (`tools/extract.py`)
   - `collision_idx.npy`, `collision.json` (`tools/collision.py`)
   - `sprites/*.png`, `sprites/sprites.json` (`tools/sprites.py`)
@@ -46,10 +59,19 @@ Status:
 ```sh
 cd app
 swift build
-swift test                       # engine maths, flippers, decoding, differential vs original, GPU passes
-swift run EpicPinball            # window, table 1
-swift run EpicPinball --table 5 --mode enhanced
+swift test                       # engine maths, flippers, decoding, differential vs original, GPU passes,
+                                 # importer parity, rules backends, enhanced physics/rendering, front end
+swift run EpicPinball            # launcher (table picker); the import screen when no game data is found
+swift run EpicPinball --table 5  # straight into table 5 (developer / smoke-test start, settings not saved)
+swift run EpicPinball --table 5 --physics enhanced --filter xbrz --lighting subtle --high-refresh
 swift run EpicPinball --data /path/to/extracted --table 10 --aspect vga
+
+# Swift importer, no window: your CD image -> a library (default ~/Library/Application Support/EpicPinballHD/Library)
+swift run EpicPinball --headless-import "../Epic Pinball ... .iso" --library /tmp/eplib
+swift run EpicPinball --library /tmp/eplib --table 10 --autoplay 100000 --physics enhanced
+swift run EpicPinball --support-dir /tmp/eps --launcher      # a throwaway settings/scores/library root
+
+../tools/package_app.sh          # release EpicPinballHD.app + .zip in build/ (docs/enhanced/frontend.md)
 ```
 
 ### Trace mode (headless, no window, no Metal)
@@ -92,9 +114,12 @@ Snapshot flags: `--scale N`, `--size WxH`, `--camera-y Y` (default: the original
 `--sim-time S` or `--frames N` (original frames at 59.94 Hz), `--launch` (hold the plunger
 to full charge, then release), `--hold-plunger N` (hold it N frames and keep holding),
 `--flip left|right|both` (hold flippers), `--scenario FILE`, `--no-sprites` (pure playfield,
-legacy window), `--aspect square|vga`, `--mode classic|enhanced`, `--filter F`.
+legacy window), `--aspect square|vga`, `--mode classic|enhanced`, `--physics classic|enhanced`,
+`--autoplay N` (a mid-game frame), and the render flags `--filter nearest|smooth|xbrz|crt`,
+`--hd-pack`, `--lighting off|subtle|vivid`, `--render SPEC` (e.g. `filter=xbrz,hd=1,lighting=vivid,scaling=fill`,
+the same as `EPIC_PINBALL_RENDER`).
 
-Presentation flags (they replace the rules' state; without them a table with `rules.json`
+Presentation flags (they replace the rules' state; without them a table whose rules load
 is shown as its rules drive it):
 
 ```sh
@@ -121,13 +146,17 @@ swift run EpicPinball --table 1 --demo        # cycles lamps, score and messages
 
 ### Data location
 
-`--data <dir>` points at the `extracted` directory (the one containing `tables/`).
-Without it the app tries, in order: `$EPIC_PINBALL_DATA`, `../extracted` relative to this
-package (resolved from the source path at compile time), then `../extracted` and
-`extracted` relative to the current directory. Missing or malformed files produce an
-error that names the exact file. A missing `engine.json` tells you to run the exporter.
+`--data <dir>` points at a data root (the directory containing `tables/`: an imported library
+or `extracted/`); `--library <dir>` at an imported library. Without them the headless modes
+and direct starts try, in order: `$EPIC_PINBALL_DATA`; outside a packaged `.app` only,
+`../extracted` relative to this package (resolved from the source path at compile time), then
+`../extracted` and `extracted` relative to the current directory; then the imported library.
+The launcher prefers the imported library over the developer candidates
+(docs/enhanced/frontend.md). With an explicit `--data`/`--library` or the library, the original
+files are taken from `<root>/original` (then `../original`) unless `--original` is given.
+Missing or malformed files produce an error that names the exact file.
 
-### Keys (as in the original, keyboard_isr EP1 cs:314B)
+### Keys (the original's, keyboard_isr EP1 cs:314B; all remappable in Settings > Controls)
 
 | Key | Action |
 | --- | --- |
@@ -141,12 +170,16 @@ error that names the exact file. A missing `engine.json` tells you to run the ex
 | M | music on / off (the tables' M key: MASI pause/resume) |
 | S | sound effects on / off (the original's opt_sfx: new effects are dropped) |
 | `-` / `=` | master volume down / up; `[` / `]` music volume |
-| R | new game with the rules (a new ball without them); after game over the frame loop waits for R |
+| R | new game with the rules (a new ball without them) |
 | Tab | full table (320x400) or the 320x240 screen |
-| F | cycle the upscale filter (nearest, xbrz-like, crt) |
+| F | cycle the upscale filter (nearest, smooth, xbrz, crt) |
 | A | pixel aspect: square or VGA (1.2x tall pixels, 4:3) |
-| E | classic or enhanced presentation |
-| Esc, Cmd-Q | quit |
+| E | classic or enhanced physics |
+| Esc | menu: resume, new game, settings, choose table, quit (after game over: initials, high scores) |
+| Cmd-Q | quit |
+
+Game controllers work too (GameController framework: shoulder buttons flip, A plunger, Menu
+opens the menu; docs/enhanced/frontend.md "Input").
 
 ### The game loop (window)
 
@@ -159,7 +192,12 @@ overrides) and to `AudioController` -> `PinballAudio.AudioEngine.present(_:)` (e
 order). Audio: `AudioEngine(dataDir: OriginalDataLocator.resolve(), table: n)`, `start()`,
 `startTableMusic()` (the launcher's SONGn, resumed after the table's fade-in). `--mute` disables audio,
 `--no-music` / `--no-sfx` start with music paused / effects off, `--volume V` sets the master volume.
-Game over freezes the frames (the original enters its menu there) until R.
+Game over freezes the frames (the original enters its menu there); the game-over panel offers
+initials entry for a top-10 score, then New Game / Choose Table.
+With enhanced physics the same frame loop runs, but `ClassicEngine`'s ball integration is replaced
+by `EnhancedPhysics` (sub-stepped, floating point; docs/enhanced/physics.md); rules and timers
+keep the 59.94 Hz cadence. With high refresh on, the renderer draws between the last two frames
+(`MotionInterpolation`).
 
 ## Layout
 
@@ -174,6 +212,9 @@ Sources/PinballCore/        Foundation only, unit tested
   Physics.swift             GameSimulation: wall clock -> 59.94 Hz frames; classic/enhanced
   Scene.swift               SceneState: ball sprite pixels, flipper frames, fallback shapes
   NPY.swift, Palette.swift, TableAssets.swift, Camera.swift
+  Enhanced/                 EnhancedPhysics (BallPhysics hook, DistanceField, FlipperModel, EnhancedConfig
+                            presets classicFeel/modern, EnhancedValidation studies)
+  Settings/GameSettings.swift  settings shared by front end, renderer, physics, audio
 Sources/PinballRender/      Metal (no AppKit)
   TableExe.swift            read-only EPn.EXE access; StripSpec = strip/camera/message layout
                             found by code signatures
@@ -183,13 +224,25 @@ Sources/PinballRender/      Metal (no AppKit)
   DotText.swift             dmd_message dot lists (font8 / font5 / font5b, centring, appended lines)
   SpriteSet.swift           flipper frame PNGs -> RGBA atlas (fallback path)
   Renderer.swift            palette pass + ball + dots, present pass (screen layout, filters)
+  EnhancedPipeline.swift, RenderSettings.swift, HDPack.swift, Lighting.swift
+                            enhanced rendering (filters, HD packs, lighting, interpolation;
+                            docs/enhanced/rendering.md)
   Shaders/Pinball.metal     Snapshot.swift
-Sources/EpicPinball/        AppKit front end: main.swift, Options.swift, App.swift,
-                            Snapshot.swift, TraceMode.swift, Presentation.swift (original camera,
-                            strip slide, message resolution, demo driver)
+Sources/PinballImport/      the Swift importer: ISO 9660 / folder sources, the extraction pipeline
+                            (playfield, palette, collision, sprites, engine.json), the library layout
+Sources/EpicPinball/        AppKit front end: main.swift, Options.swift, App.swift (window, game
+                            controller, menus), AppModel / LauncherUI / SettingsUI / GameOverlay
+                            (SwiftUI launcher, settings, pause/game-over/initials), Settings,
+                            HighScores, Input (key bindings, gamepad), TableCatalog (library
+                            discovery, table names and previews), ImporterHookup,
+                            Snapshot.swift, UISnapshot.swift, TraceMode.swift, Presentation.swift
+                            (original camera, strip slide, message resolution, demo driver)
   Rules/                    the table rules: RulesProgram (rules.json), RulesMachine (block-graph
                             interpreter over the EXE's data segment, engine bytes bound to ClassicEngine),
-                            MiniX86 (runs unlifted EXE code), TableGlue (EP1 fragment addresses, signatures),
+                            MiniX86 (runs EXE code: the whole rules in the direct backend, the unlifted
+                            pieces in the lifted one), ExeImage / X86Decoder / RulesDiscovery /
+                            HookDiscovery / EngineDiscovery / DirectProgram (the direct backend's run-time
+                            discovery, docs/enhanced/rules-direct.md), TableGlue (EP1 fragment addresses, signatures),
                             RulesRuntime (dispatch, hooks, main-loop schedule, end of ball, sounds, messages,
                             PresentationState), PaletteCycle (EP8 palette ring)
   ClassicEngine+Rules.swift the full-mode main loop in the original's order; startGame
@@ -201,8 +254,13 @@ Tests/PinballCoreTests/     EngineTests (reflection goldens, directions, integra
                             decoding, traces), EngineFixture / RulesFixture (synthetic data), Rules*Tests,
                             MiniX86Tests, DifferentialTests / RulesLiveTests (vs the original, live),
                             HeadlessGameTests (a full game on every table), PresentationUnitTests (dot text,
-                            composer, strip scan, palette ring), RenderTests, AssetTests, CameraTests
+                            composer, strip scan, palette ring), RenderTests, AssetTests, CameraTests,
+                            RulesDirectTests (direct vs lifted), EnhancedPhysicsTests, EnhancedTableTests,
+                            EnhancedRenderTests (classic byte-identical goldens, filters, HD packs)
 Tests/PinballAudioTests/    bank/module loading, voice allocation, offline rendering
+Tests/PinballImportTests/   importer parity with the Python tools (every file, all 13 tables), sources
+Tests/EpicPinballTests/     front end: settings, key bindings, high scores, catalog, library discovery,
+                            first-launch import of the user's CD image
 ```
 
 ## The classic engine (EP1 addresses; see docs/formats/engine.md, collision.md)
@@ -235,9 +293,10 @@ Tests/PinballAudioTests/    bank/module loading, voice allocation, offline rende
   +12/frame, release `vy -= charge; y -= 1`), nudge/tilt, `kick = 0`, then gravity
   `vy += g + extra` if `vy <= 320`, then the sensor scan with the exported handlers.
 
-No floating point is used anywhere in `ClassicEngine`. `SimulationMode.enhanced` is the
-hook for smoother play: it uses the same engine and only draws the ball at an
-interpolated sub-pixel position.
+No floating point is used anywhere in `ClassicEngine`. Enhanced physics plugs in through the
+`BallPhysics` hook (`GameSimulation.physicsMode`); with the classic default the engine is
+untouched and bit-exact (run_suite physics,rules 830/830 on both rules backends).
+`SimulationMode.enhanced` (`--mode`) only draws the ball at an interpolated sub-pixel position.
 
 ## Rendering
 
@@ -259,8 +318,9 @@ interpolated sub-pixel position.
    older path draws flipper frames from the PNG atlas, with procedural fallbacks.
 3. **Present pass**: the 320x240 screen = window rows from pass 1 + strip rows below
    (palette indices), integer-scaled and aspect-correct (`ViewportFit`), through the selected
-   filter: `nearest` (classic), `xbrz-like` (placeholder: Scale2x/EPX rules per output pixel),
-   `crt` (scanlines + aperture mask).
+   filter. `nearest` with everything else off is the classic path (byte-identical to the old
+   renderer, EnhancedRenderTests); `smooth`, `xbrz`, `crt`, HD packs, lighting and
+   interpolation run the enhanced pipeline (docs/enhanced/rendering.md).
 
 At 1x, `--no-sprites --full` matches `playfield.png` exactly.
 
@@ -391,8 +451,11 @@ The older `scratch/port/run_all.sh` and `diff_traces.py` from the port track sti
   boot starts from the EXE image without the intro/boot tail (attract text state, EP8's palette phase).
 - Rule code the lift cannot express (EP6 cs:31E1, EP8 cs:3613/0240, EP9 h29c6) runs from the EXE in `MiniX86`; display
   routines inside it are skipped.
-- Demo/attract mode (auto-flip, stuck-ball nudge), the PC-speaker sound path, the F1 parameter editor and the launcher
-  are not ported.
+- Demo/attract mode (auto-flip, stuck-ball nudge), the PC-speaker sound path, the F1 parameter editor and the
+  original DOS launcher are not ported (the app has its own launcher).
+- EP12 can award 2,258,632,704 points from sensor C3 (handler cs:27D9) when `[0x34ad]` is 0: the original's
+  `mov cx,[0x34ad]` / `loop` adds 100,000 65,536 times (mod 2^32). The port reproduces the original here.
+- Enhanced-version gaps are listed in docs/enhanced/README.md.
 - Presentation: message effects (AL: dots flying off, fades, colour cycling; render_frame cs:3E35-4373) are timed but
   not animated. EP9-13 message colours come from a DS byte the rules do not report yet (the table's most common value is
   used). Palette fades are not shown; EP8's palette ring is (PaletteOverride for 0xA0..0xDF). EP8's robot set is not drawn.

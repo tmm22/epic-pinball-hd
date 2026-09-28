@@ -12,7 +12,7 @@ struct SettingsView: View {
         VStack(spacing: 0) {
             TabView {
                 GameTab(settings: model.settings).tabItem { Text("Game") }
-                DisplayTab(settings: model.settings).tabItem { Text("Display") }
+                DisplayTab(settings: model.settings, hdStatus: model.hdPackStatus).tabItem { Text("Display") }
                 AudioTab(settings: model.settings).tabItem { Text("Audio") }
                 ControlsTab(model: model, settings: model.settings).tabItem { Text("Controls") }
                 LibraryTab(model: model).tabItem { Text("Library") }
@@ -39,7 +39,7 @@ private struct GameTab: View {
             Text("Classic runs the original integer engine exactly (59.94 frames/s). Enhanced keeps the "
                  + "same rules and timing with smoother motion.").font(.caption).foregroundStyle(.secondary)
             Picker("Players", selection: $settings.frontEnd.players) { ForEach(1...4, id: \.self) { Text("\($0)").tag($0) } }
-            Picker("Balls per game", selection: $settings.frontEnd.ballsPerGame) { ForEach([3, 5], id: \.self) { Text("\($0)").tag($0) } }
+            Picker("Balls per game", selection: $settings.frontEnd.ballsPerGame) { ForEach(ballChoices(settings.frontEnd.ballsPerGame), id: \.self) { Text("\($0)").tag($0) } }
         }
         .formStyle(.grouped)
     }
@@ -47,6 +47,7 @@ private struct GameTab: View {
 
 private struct DisplayTab: View {
     @Bindable var settings: SettingsStore
+    var hdStatus: String?
     var body: some View {
         Form {
             Picker("Upscale filter", selection: $settings.game.upscaleFilter) {
@@ -62,7 +63,9 @@ private struct DisplayTab: View {
             Toggle("Dynamic lighting", isOn: $settings.game.dynamicLighting)
             Toggle("Use HD art pack when installed", isOn: $settings.game.useHDPack)
             Toggle("Start in full screen", isOn: $settings.frontEnd.startFullscreen)
-            Text("HD packs are generated from your own game files and stored in your Library folder.")
+            if let hdStatus { LabeledContent("HD pack") { Text(hdStatus).lineLimit(3) } }
+            Text("HD packs are generated from your own game files (tools/hdpack/make_pack.py) and live in "
+                 + "Application Support/EpicPinballHD/HDPacks or next to your library; nothing is bundled.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .formStyle(.grouped)

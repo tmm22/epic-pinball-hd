@@ -41,7 +41,8 @@ enum SnapshotMode {
         let renderer = try PinballRenderer(device: device, assets: assets,
                                            flipperSprites: o.sprites ? loadFlipperSprites(assets: assets, engine: engine) : nil)
         renderer.aspect = o.aspect
-        renderer.filter = o.filter
+        // Render flags (--filter, --hd-pack, --lighting, --render) on top of EPIC_PINBALL_RENDER / classic.
+        if let s = o.renderSettings(base: renderer.settings) { renderer.settings = s }
         var pres: ClassicPresentation?
         if !o.legacyWindow, o.sprites, let p = ClassicPresentation.load(assets: assets, engine: engine.data, dataRoot: dataRoot, originalDir: o.originalDir) {
             p.setStrip(shown: o.stripShown, immediately: true)
@@ -150,7 +151,9 @@ enum SnapshotMode {
             let c = p.composer
             print("presentation: graphics from \(c.graphics.source), window \(p.windowRows) rows + strip \(renderer.visibleStripRows(for: scene)) rows, "
                   + "lamps drawn \(p.state.lamps.count), message \(p.currentMessage().map { "\($0.text.count) chars ax=0x\(String($0.ax, radix: 16)) di=\($0.di)" } ?? "none")"
-                  + ", filter \(o.filter.rawValue)")
+                  + ", filter \(renderer.settings.filter.rawValue)"
+                  + (renderer.settings.isClassic ? "" : ", enhanced render (hd pack \(renderer.hdPackActive ? "on" : "off"), lighting \(renderer.settings.lighting.rawValue))"))
+            for w in renderer.hdPackWarnings { warn("HD pack: \(w)") }
             if ProcessInfo.processInfo.environment["EPIC_PINBALL_DEBUG_SPEC"] != nil { print("strip spec: \(c.spec)") }
         }
         print("wrote \(url.path) (\(width)x\(height), table \(assets.table), \(o.full ? "full table" : "window top=\(camera.y)"), "

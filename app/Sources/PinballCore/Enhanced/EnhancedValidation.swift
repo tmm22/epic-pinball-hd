@@ -426,3 +426,116 @@ extension EnhancedValidation {
         return out
     }
 }
+
+// MARK: - Flipper shots from real play
+
+extension EnhancedValidation {
+    /// The ball 4 frames before a flipper shot in classic play (both flippers at rest), and the
+    /// player's inputs from then until 12 frames after the shot.
+    public struct ShotSnapshot: Sendable {
+        public var ball: BallState
+        public var inputs: [FrameInput]
+    }
+
+    /// Classic autoplay games (`autoplay`, one per plunge strength, `frames` each) on `engine` (with
+    /// rules): every frame in which ball 0 turns from falling to rising faster than 1 px/step below
+    /// y 290 with both flippers at rest 4 frames earlier gives a snapshot. Most are flipper shots;
+    /// a few are slingshot kicks, which the replay also compares.
+    public static func flipperShotSnapshots(engine e: ClassicEngine, plunges: [Int], frames: Int) -> [ShotSnapshot] {
+        var snaps: [ShotSnapshot] = []
+        for pf in plunges {
+            e.resetToPowerOn()
+            var hist: [(BallState, FrameInput, Bool)] = []
+            var prev = BallState(), pending: Int?
+            let saved = e.onStep
+            e.onStep = { _, st, _ in
+                guard st == e.data.timing.stepsPerFrame - 1 else { return }
+                let b = e.balls[0]
+                hist.append((b, e.input, e.groups.indices.allSatisfy { Int(e.groups[$0].angle) == e.data.flipperGroups[$0].restAngle }))
+                let now = hist.count - 1
+                if let at = pending, now >= at + 12 {
+                    let s0 = at - 4
+                    if s0 >= 0 && hist[s0].2 && hist[s0].0.active == 1 {
+                        snaps.append(ShotSnapshot(ball: hist[s0].0, inputs: (s0 + 1...at + 12).map { hist[$0].1 }))
+                    }
+                    pending = nil
+                }
+                if pending == nil && b.active != 0 && b.y > 290 && prev.vy >= 0 && b.vy < -128 { pending = now }
+                prev = b
+            }
+            _ = autoplay(engine: e, frames: frames, plungeFrames: pf)
+            e.onStep = saved
+        }
+        return snaps
+    }
+
+    /// Replays `snapshots` on a fresh copy of the table (rules and sensors off, flippers at rest, level
+    /// 0) with the recorded inputs; returns the most upward velocity reached in each (px/step).
+    /// `config == nil` = the classic engine. One engine and model serve all replays.
+    public static func replayShots(data d: EngineData, buffer: [UInt8], snapshots: [ShotSnapshot],
+                                   config: EnhancedPhysicsConfig?) throws -> [SIMD2<Double>] {
+        let e = try ClassicEngine(data: d, startBuffer: buffer)
+        e.sensorsEnabled = false
+        e.ballLostResets = false
+        let m = config.map { EnhancedPhysics.install(on: e, config: $0) }
+        var out: [SIMD2<Double>] = []
+        for sn in snapshots {
+            e.resetToRest()
+            for i in e.balls.indices { e.balls[i].active = 0 }
+            if let m { m.step(e) }   // retires the previous replay's body
+            var b = sn.ball
+            b.layer = 0
+            e.balls[0] = b
+            var best = SIMD2<Double>(0, 0)
+            for inp in sn.inputs {
+                e.input = inp
+                e.runFrame()
+                let v = SIMD2(Double(e.balls[0].vx), Double(e.balls[0].vy)) / 128
+                if v.y < best.y { best = v }
+            }
+            out.append(best)
+        }
+        return out
+    }
+
+    public struct ShotComparison: Sendable, CustomStringConvertible {
+        public var shots = 0
+        public var classicMeanUp = 0.0, enhancedMeanUp = 0.0
+        /// Mean |log(speed_enhanced / speed_classic)| per shot.
+        public var meanAbsLogSpeedRatio = 0.0
+        /// Median |direction difference| per shot (degrees).
+        public var medianAngleDiff = 0.0
+        /// Share of shots faster than 3.5 px/step upward (the original's double top kick).
+        public var classicStrong = 0.0, enhancedStrong = 0.0
+        public var description: String {
+            String(format: "%d shots: up-speed classic %.2f / enhanced %.2f px/step, mean |log speed ratio| %.3f, median |d angle| %.1f deg, strong (>3.5) %.0f%% / %.0f%%",
+                   shots, classicMeanUp, enhancedMeanUp, meanAbsLogSpeedRatio, medianAngleDiff, 100 * classicStrong, 100 * enhancedStrong)
+        }
+    }
+
+    /// Paired comparison of replayed shots (only those the classic replay turns upward by more than
+    /// 0.5 px/step).
+    public static func compareShots(classic c: [SIMD2<Double>], enhanced x: [SIMD2<Double>]) -> ShotComparison {
+        var r = ShotComparison()
+        var lr: [Double] = [], ang: [Double] = [], cu: [Double] = [], eu: [Double] = []
+        for (a, b) in zip(c, x) where -a.y > 0.5 {
+            let sa = (a * a).sum().squareRoot(), sb = (b * b).sum().squareRoot()
+            lr.append(abs(log(max(sb, 0.05) / max(sa, 0.05))))
+            var d = (atan2(b.y, b.x) - atan2(a.y, a.x)) * 180 / .pi
+            while d > 180 { d -= 360 }
+            while d < -180 { d += 360 }
+            ang.append(abs(d))
+            cu.append(-a.y); eu.append(-b.y)
+        }
+        r.shots = lr.count
+        guard r.shots > 0 else { return r }
+        let n = Double(r.shots)
+        r.classicMeanUp = cu.reduce(0, +) / n
+        r.enhancedMeanUp = eu.reduce(0, +) / n
+        r.meanAbsLogSpeedRatio = lr.reduce(0, +) / n
+        r.medianAngleDiff = ang.sorted()[ang.count / 2]
+        r.classicStrong = Double(cu.filter { $0 > 3.5 }.count) / n
+        r.enhancedStrong = Double(eu.filter { $0 > 3.5 }.count) / n
+        return r
+    }
+}

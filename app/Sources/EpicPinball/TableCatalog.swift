@@ -96,9 +96,20 @@ enum TableCatalog {
                 preview = (try? Data(contentsOf: o.appendingPathComponent("EP\(n).DAT"))).flatMap { try? PCXImage.decode($0).cgImage() }
             }
             if preview == nil { preview = loadPNG(dir.appendingPathComponent("preview.png")) }
+            preview = preview.map(tableArt)
             return TableInfo(number: n, name: name ?? "Table \(n)", preview: preview, available: missing.isEmpty,
                              problem: missing.isEmpty ? nil : "missing \(missing.joined(separator: ", "))")
         }
+    }
+
+    /// The original table-select screen (320x200) has the table art in its left half and an empty
+    /// high-score box in its right half (the same on all 13 tables): keep the art. Other sizes
+    /// are returned unchanged.
+    static let selectScreenArtWidth = 160
+    static func tableArt(_ image: CGImage) -> CGImage {
+        guard image.width == 320, image.height == 200,
+              let c = image.cropping(to: CGRect(x: 0, y: 0, width: selectScreenArtWidth, height: 200)) else { return image }
+        return c
     }
 
     /// IDn.DAT: up to 20 bytes of name, space padded, 0x1A (DOS EOF) terminated.
