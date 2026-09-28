@@ -5,15 +5,14 @@ import Foundation
 
 public typealias Vec2 = SIMD2<Double>
 
-/// How the simulation is presented / integrated.
+/// How the simulation is *presented* (the physics is chosen separately with
+/// `GameSimulation.physicsMode` / `GameSettings.physicsMode`).
 public enum SimulationMode: String, Sendable, CaseIterable {
-    /// Bit-exact original engine at 59.94 frames/s; the ball is drawn at its integer
-    /// position like the original.
+    /// The ball is drawn at its integer position like the original.
     case classic
-    /// Hook for a smoothed mode. Physics is still the classic integer engine (so it
-    /// stays deterministic and comparable); only presentation differs: the ball is drawn
-    /// at a sub-pixel position interpolated between frames. Float sub-stepping or other
-    /// "feel" changes belong here and must never touch `ClassicEngine`.
+    /// The ball is drawn at a sub-pixel position interpolated between frames. This does not
+    /// change the physics: with `physicsMode == .classic` the engine stays the bit-exact integer
+    /// engine; `physicsMode == .enhanced` installs `EnhancedPhysics` (Enhanced/).
     case enhanced
 }
 
@@ -33,9 +32,31 @@ public final class GameSimulation {
 
     public var frameDuration: Double { 1.0 / engine.data.timing.frameHz }
 
-    public init(engine: ClassicEngine, mode: SimulationMode = .classic, options: RulesOptions = RulesOptions()) {
+    /// Ball physics: `.classic` = the original integer engine (bit-exact), `.enhanced` =
+    /// `EnhancedPhysics` with `enhancedConfig`. Switching takes effect at the next step.
+    public var physicsMode: GameSettings.PhysicsMode = .classic {
+        didSet { if physicsMode != oldValue { installPhysics() } }
+    }
+    /// Tunables of the enhanced physics (applied to the installed model at the next step).
+    public var enhancedConfig: EnhancedPhysicsConfig = .classicFeel {
+        didSet { if enhancedConfig != oldValue, physicsMode == .enhanced { enhanced?.config = enhancedConfig } }
+    }
+    /// The installed enhanced model (nil in classic physics).
+    public var enhanced: EnhancedPhysics? { engine.ballPhysics as? EnhancedPhysics }
+
+    func installPhysics() {
+        switch physicsMode {
+        case .classic: EnhancedPhysics.uninstall(from: engine)
+        case .enhanced: EnhancedPhysics.install(on: engine, config: enhancedConfig)
+        }
+    }
+
+    public init(engine: ClassicEngine, mode: SimulationMode = .classic, options: RulesOptions = RulesOptions(),
+                physics: GameSettings.PhysicsMode = .classic, enhancedConfig: EnhancedPhysicsConfig = .classicFeel) {
         self.engine = engine
         self.mode = mode
+        self.physicsMode = physics
+        self.enhancedConfig = enhancedConfig
         if engine.rules != nil {
             engine.startGame(options: options)   // table rules in full mode (ClassicEngine+Rules.swift)
         } else {
@@ -46,6 +67,11 @@ public final class GameSimulation {
         let p = Self.subpixel(engine.balls[0])
         previousBall = p
         currentBall = p
+        // An enhanced model the caller installed on the engine stays (e.g. `AutoPlay.run` on it).
+        if physics == .enhanced { installPhysics() } else if let m = engine.ballPhysics as? EnhancedPhysics {
+            physicsMode = .enhanced
+            self.enhancedConfig = m.config
+        }
     }
 
     static func subpixel(_ b: BallState) -> Vec2 {

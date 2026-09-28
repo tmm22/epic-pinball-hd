@@ -2,24 +2,42 @@ import Foundation
 import Metal
 import PinballCore
 
-/// Upscaling filter applied in the present pass (integer-scaled viewport in every case).
-/// Add a case + a fragment function in Pinball.metal to plug in a new filter.
-/// `nearest` is the classic look; the others are enhanced-mode groundwork:
-/// * `xbrz-like`: placeholder edge-directed filter (Scale2x/EPX rules evaluated per output
-///   pixel, so it works at any integer scale); a real xBRZ can replace the function.
-/// * `crt`: nearest plus scanlines and a light aperture mask.
+/// Upscaling filter of the present pass (docs/enhanced/rendering.md).
+/// * `nearest`: the classic look (the unchanged classic pass when nothing else is enabled;
+///   sharp-bilinear at fractional scales in the enhanced path).
+/// * `smooth`: Catmull-Rom bicubic.
+/// * `xbrz`: xBRZ edge-directed pixel-art scaling at any scale (prepass + freescale evaluation).
+/// * `crt`: scanlines with brightness-dependent beam width, aperture-grille mask, subtle curvature.
 public enum UpscaleFilter: String, Sendable, CaseIterable {
     case nearest
-    case xbrzLike = "xbrz-like"
+    case smooth
+    case xbrz
     case crt
 
-    var fragmentFunctionName: String {
-        switch self {
-        case .nearest: return "present_nearest"
-        case .xbrzLike: return "present_epx"
-        case .crt: return "present_crt"
+    /// Older name of `xbrz` (the Scale2x-style placeholder it replaced).
+    public static let xbrzLike = UpscaleFilter.xbrz
+
+    /// Also accepts the old spelling "xbrz-like".
+    public init?(rawValue: String) {
+        switch rawValue {
+        case "nearest": self = .nearest
+        case "smooth", "bicubic": self = .smooth
+        case "xbrz", "xbrz-like": self = .xbrz
+        case "crt": self = .crt
+        default: return nil
         }
     }
+
+    public var rawValue: String {
+        switch self {
+        case .nearest: return "nearest"
+        case .smooth: return "smooth"
+        case .xbrz: return "xbrz"
+        case .crt: return "crt"
+        }
+    }
+
+    var fragmentFunctionName: String { "present_nearest" }
 }
 
 public enum RenderError: Error, CustomStringConvertible {
@@ -101,7 +119,29 @@ public final class PinballRenderer {
     public let device: MTLDevice
     public let commandQueue: MTLCommandQueue
     public var aspect: PixelAspect = .square
-    public var filter: UpscaleFilter = .nearest
+    /// Enhanced rendering options; `.classic` (the default) keeps the original passes.
+    public var settings = RenderSettings.classic
+    /// The upscale filter (shorthand for `settings.filter`).
+    public var filter: UpscaleFilter {
+        get { settings.filter }
+        set { settings.filter = newValue }
+    }
+    /// High refresh: the front end sets this every display frame (`MotionInterpolation(simulation:)`);
+    /// used when `settings.interpolate` is on.
+    public var interpolation: MotionInterpolation?
+    /// GPU time of the most recently completed frame encoded by `encode` (nil until one completes).
+    public var lastGPUTime: RenderTiming? { timingBox.get() }
+    private let timingBox = TimingBox()
+    /// Warnings from loading the HD pack (empty if none was requested or it loaded cleanly).
+    public var hdPackWarnings: [String] { enhanced?.hdWarnings ?? [] }
+    /// True while an HD pack is drawn.
+    public var hdPackActive: Bool { settings.useHDPack && enhanced?.hd != nil }
+    let tableNumber: Int
+    let assetsDirectory: URL
+    private var enhanced: EnhancedPipeline?
+    private var lastLampStates: [UInt8] = []
+    private var presentCalls = 0
+    private var lastInterpFrame: Int?
     public private(set) var palette: Palette
     /// Palette before per-frame overrides (PresentationState.paletteOverrides).
     public private(set) var basePalette: Palette
@@ -110,19 +150,20 @@ public final class PinballRenderer {
     /// Strip rows shown below the window (set by the front end; 0 = none).
     public var stripRows = 0
 
-    private let library: MTLLibrary
+    let library: MTLLibrary
     private let scenePipeline: MTLRenderPipelineState
     private var presentPipelines: [String: MTLRenderPipelineState] = [:]
-    private let indexTexture: MTLTexture
-    private let paletteTexture: MTLTexture
+    let indexTexture: MTLTexture
+    let paletteTexture: MTLTexture
     private let atlasTexture: MTLTexture
     /// Window-relative dot overlay (320x240 R8Uint, 0 = transparent) and strip (320x30 R8Uint).
-    private let overlayTexture: MTLTexture
-    private let stripTexture: MTLTexture
+    let overlayTexture: MTLTexture
+    let stripTexture: MTLTexture
     /// Flipper sprite frames (nil entries fall back to procedural capsules).
     public let flipperSprites: FlipperSpriteSet?
+    private let assets: TableAssets
     /// Native frame: 320 x (400 + 1). One spare row allows sub-row smooth scrolling.
-    private let frameTexture: MTLTexture
+    let frameTexture: MTLTexture
     static let frameFormat: MTLPixelFormat = .rgba8Unorm
 
     public init(device: MTLDevice, assets: TableAssets, flipperSprites: FlipperSpriteSet? = nil) throws {
@@ -132,6 +173,10 @@ public final class PinballRenderer {
         self.commandQueue = q
         self.palette = assets.palette
         self.basePalette = assets.palette
+        self.tableNumber = assets.table
+        self.assetsDirectory = assets.directory
+        self.assets = assets
+        if let env = RenderSettings.fromEnvironment() { settings = env }
 
         let source = try Self.shaderSource()
         do { library = try device.makeLibrary(source: source, options: nil) } catch {
@@ -284,6 +329,8 @@ public final class PinballRenderer {
     public func present(_ state: PresentationState, message: DotMessage?, flippers: [SceneState.FlipperSprite] = [],
                         plungerY: Int? = nil, paused: Bool = false, lampSprites: [UInt8]? = nil) {
         guard let c = composer else { return }
+        lastLampStates = state.lampStates
+        presentCalls += 1
         if let ls = lampSprites { c.applyLampSprites(ls) } else { c.applyLamps(state.lamps) }
         for f in flippers { c.setFlipper(f.index, frame: f.frame) }
         c.setPlunger(y: plungerY)
@@ -314,12 +361,43 @@ public final class PinballRenderer {
 
     /// Strip rows drawn for this scene (none in the 400-row full-table view).
     public func visibleStripRows(for scene: SceneState) -> Int {
+        if !settings.isClassic {
+            return EnhancedPipeline.stripRows(scene, settings: settings, composer: composer, stripRows: stripRows)
+        }
         guard composer != nil, scene.viewHeight < Double(TableGeometry.height) else { return 0 }
         return max(0, min(stripRows, ClassicComposer.stripBufferRows))
     }
 
-    /// Encodes both passes, finishing with `target` cleared to black outside the viewport.
+    /// Encodes the frame, finishing with `target` cleared to black outside the viewport.
+    /// Classic settings run the original two passes; anything else the enhanced pipeline.
     public func encode(scene: SceneState, into commandBuffer: MTLCommandBuffer, target: MTLTexture) throws {
+        let box = timingBox
+        commandBuffer.addCompletedHandler { cb in
+            let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000
+            if ms > 0 { box.set(RenderTiming(gpuMilliseconds: ms)) }
+        }
+        if settings.isClassic {
+            try encodeClassic(scene: scene, into: commandBuffer, target: target)
+            return
+        }
+        if enhanced == nil { enhanced = try EnhancedPipeline(device: device, library: library, assets: assets) }
+        var frames = 1
+        if let ip = interpolation {
+            frames = lastInterpFrame.map { max(0, ip.frame - $0) } ?? 0
+            lastInterpFrame = ip.frame
+        } else {
+            frames = presentCalls > 0 ? 1 : 0
+            presentCalls = 0
+        }
+        let inputs = EnhancedPipeline.FrameInputs(scene: scene, settings: settings, interpolation: interpolation, aspect: aspect,
+                                                  composer: composer, palette: palette, basePalette: basePalette,
+                                                  stripRows: stripRows, lampStates: lastLampStates, framesAdvanced: frames)
+        try enhanced!.encode(inputs, renderer: self, into: commandBuffer, target: target)
+    }
+
+    /// The original two passes (palette lookup + ball + dots at native resolution, then the
+    /// integer nearest upscale). Unchanged by the enhanced work (EnhancedRenderTests).
+    private func encodeClassic(scene: SceneState, into commandBuffer: MTLCommandBuffer, target: MTLTexture) throws {
         let fit = fit(for: scene, outputWidth: target.width, outputHeight: target.height)
         let tableH = Double(TableGeometry.height)
         let visibleRows = scene.viewHeight.rounded()
@@ -406,4 +484,12 @@ public final class PinballRenderer {
         enc2.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc2.endEncoding()
     }
+}
+
+/// Written from Metal's completion thread, read by the owner.
+final class TimingBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: RenderTiming?
+    func set(_ v: RenderTiming) { lock.lock(); value = v; lock.unlock() }
+    func get() -> RenderTiming? { lock.lock(); defer { lock.unlock() }; return value }
 }

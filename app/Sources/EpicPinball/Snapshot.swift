@@ -53,7 +53,7 @@ enum SnapshotMode {
             pres = p
         }
 
-        let sim = GameSimulation(engine: engine, mode: o.mode, options: o.rulesOptions)
+        let sim = GameSimulation(engine: engine, mode: o.mode, options: o.rulesOptions, physics: o.physics)
         pres?.camera.snap(maxBallY: ClassicPresentation.maxActiveBallY(engine), cameraMax: pres?.cameraMax ?? 0x12A)
         let useRules = engine.rules != nil && !o.hasPresentationFlags
         func frameDone() {

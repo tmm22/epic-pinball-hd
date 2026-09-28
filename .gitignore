@@ -9,3 +9,4 @@ __pycache__/
 .swiftpm/
 *.xcodeproj/xcuserdata/
 .DS_Store
+build/

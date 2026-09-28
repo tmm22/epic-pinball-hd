@@ -63,6 +63,15 @@ final class AudioController {
         if paused { engine.stopAllSounds() }
     }
 
+    /// Absolute levels from the settings (master, music, effects; 0...1).
+    func apply(master: Double, music: Double, sfx: Double) {
+        let v = AudioVolumes(master: Float(min(max(master, 0), 1)), sfx: Float(min(max(sfx, 0), 1)),
+                             music: Float(min(max(music, 0), 1)))
+        guard v != volumes else { return }
+        volumes = v
+        engine.setVolumes(volumes)
+    }
+
     func adjust(master: Float = 0, music: Float = 0) {
         volumes.master = min(max(volumes.master + master, 0), 1)
         volumes.music = min(max(volumes.music + music, 0), 1)

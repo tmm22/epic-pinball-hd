@@ -117,6 +117,19 @@ public final class RulesRuntime {
     /// > 0 while a rule-code `call` op runs from the EXE: unknown near calls in there are followed
     /// (MiniX86 still stops at anything outside its subset: port I/O, ES outside DS/playfield).
     private var nativeDepth = 0
+    /// Which implementation runs the rule code (`RulesProgram.direct`).
+    public let backend: RulesBackend
+    /// Direct backend: > 0 while a handler or hook runs from the EXE (the callout then executes
+    /// every near call and far call into the code segment that is not a display, sound or engine
+    /// routine, as the lifted graphs' gosubs and `call` ops do).
+    private var directDepth = 0
+    /// Dot-message text routines (`textRoutines(code:)`): text calls wherever they come from.
+    public private(set) var textRoutines = Set<Int>()
+    /// Direct backend: the hook stops as a 64 K bitmap for MiniX86.
+    private var stopBitmap: [Bool] = []
+    /// Direct backend: where the per-frame rule code spends its time (instructions executed by
+    /// MiniX86 in handlers and hooks since the last reset), for performance measurements.
+    public var directInstructions: Int { x86.executed }
 
     // MARK: - loading
 
@@ -124,12 +137,15 @@ public final class RulesRuntime {
         dataRoot.appendingPathComponent("tables/EP\(table)/rules.json")
     }
 
-    /// The user's EPn.EXE: `originalDir`, `$EPIC_PINBALL_ORIGINAL`, or `<dataRoot>/../original`.
+    /// The user's EPn.EXE: `originalDir`, `$EPIC_PINBALL_ORIGINAL`, `<dataRoot>/../original` (the
+    /// development layout next to extracted/), or `<dataRoot>/original` (an imported library,
+    /// PinballImport `LibraryLayout.originalDirectory`).
     public static func locateEXE(dataRoot: URL, table: Int, originalDir: URL? = nil) -> URL? {
         var dirs: [URL] = []
         if let o = originalDir { dirs.append(o) }
         if let e = ProcessInfo.processInfo.environment["EPIC_PINBALL_ORIGINAL"], !e.isEmpty { dirs.append(URL(fileURLWithPath: e)) }
         dirs.append(dataRoot.deletingLastPathComponent().appendingPathComponent("original"))
+        dirs.append(dataRoot.appendingPathComponent("original"))
         for d in dirs {
             for name in ["EP\(table).EXE", "ep\(table).exe", "Ep\(table).exe"] {
                 let u = d.appendingPathComponent(name)
@@ -139,8 +155,27 @@ public final class RulesRuntime {
         return nil
     }
 
-    /// Loads rules.json and the table's EXE. Throws `RulesError.missingFile` when either is absent.
-    public static func load(dataRoot: URL, table: Int, originalDir: URL? = nil, options: RulesOptions = RulesOptions()) throws -> RulesRuntime {
+    /// Loads the table's rules for `backend`: direct = the user's EXE only (the rule code is found
+    /// and run from it); lifted = rules.json and the EXE. The direct backend falls back to the
+    /// lifted one (with a warning) if the discovery fails and rules.json exists. Throws
+    /// `RulesError.missingFile` when a needed file is absent.
+    public static func load(dataRoot: URL, table: Int, originalDir: URL? = nil, options: RulesOptions = RulesOptions(),
+                            backend: RulesBackend = .default) throws -> RulesRuntime {
+        if backend == .direct {
+            guard let exeURL = locateEXE(dataRoot: dataRoot, table: table, originalDir: originalDir) else {
+                throw RulesError.missingFile("cannot find your EP\(table).EXE (looked in $EPIC_PINBALL_ORIGINAL and \(dataRoot.deletingLastPathComponent().appendingPathComponent("original").path))")
+            }
+            let exe: [UInt8]
+            do { exe = [UInt8](try Data(contentsOf: exeURL)) } catch { throw RulesError.missingFile("cannot read \(exeURL.path): \(error)") }
+            do {
+                return try direct(exe: exe, table: table, options: options, exeName: exeURL.lastPathComponent)
+            } catch {
+                guard FileManager.default.fileExists(atPath: rulesURL(dataRoot: dataRoot, table: table).path) else { throw error }
+                let r = try load(dataRoot: dataRoot, table: table, originalDir: originalDir, options: options, backend: .lifted)
+                r.warn("direct rules backend unavailable (\(error)); using rules.json")
+                return r
+            }
+        }
         let url = rulesURL(dataRoot: dataRoot, table: table)
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw RulesError.missingFile("missing \(url.path)\nRun `.venv/bin/python tools/rules.py \(table)` (reads your own original/EP\(table).EXE) first.")
@@ -166,27 +201,44 @@ public final class RulesRuntime {
         return r
     }
 
+    /// The direct backend for `exe` (no rules.json): `RulesProgram.discover` finds the rule code.
+    public static func direct(exe: [UInt8], table: Int, options: RulesOptions = RulesOptions(), exeName: String? = nil) throws -> RulesRuntime {
+        let program: RulesProgram
+        do { program = try RulesProgram.discover(exe: exe, table: table, exeName: exeName).0 } catch {
+            throw RulesError.invalid("EP\(table): the rule code was not found in the EXE (\(error))")
+        }
+        let r = try RulesRuntime(program: program, exe: exe, options: options)
+        r.x86.playfieldSegmentVars = program.segmentVars
+        return r
+    }
+
     public init(program: RulesProgram, exe: [UInt8], options: RulesOptions = RulesOptions()) throws {
         self.program = program
         self.options = options
+        backend = program.direct ? .direct : .lifted
         machine = try RulesMachine(program: program, exe: exe)
         glue = TableGlue.make(program: program, machine: machine)
         x86 = MiniX86(machine: machine)
         paletteCycle = PaletteCycle.find(code: machine.code)
+        textRoutines = Self.textRoutines(code: machine.code)
         lampDrawn = [UInt8](repeating: 0, count: max(program.lampCount, program.lampSlotCount))
         warnings += glue.warnings
+        if program.direct {
+            stopBitmap = [Bool](repeating: false, count: 0x10000)
+            for s in program.hookStops { stopBitmap[s & 0xFFFF] = true }
+        }
         for h in program.hooks.values { hookByIP[h.entryIP] = h.entry }
         for (i, g) in program.gates.enumerated() { if let r = g.routine { gatesByRoutine[r, default: []].append(i) } }
         nextBallSkillEntry = program.hooks["next_ball_skill"]?.entry
         // The dispatcher's jump table (source.sensor_table), read from the EXE: colour -> handler.
-        if let t = program.sensorTable {
+        if let t = program.sensorTable, !program.direct {
             for v in 0xAA...0xFF {
                 let a = (t + 2 * (v - 0xAA)) & 0xFFFF
                 let ip = Int(machine.code[a]) | Int(machine.code[(a + 1) & 0xFFFF]) << 8
                 if let e = program.labels[String(format: "L%04x", ip)] { dispatchTable[v] = (e, ip) }
             }
         }
-        for (v, name) in program.colourHandler {
+        for (v, name) in program.colourHandler where !program.direct {
             guard let h = program.handlers[name] else { continue }
             if let d = dispatchTable[v], d.entry != h.entry {
                 warn("jump table entry for colour \(String(format: "%02X", v)) is cs:\(hex4(d.ip)) but rules.json lists \(name)")
@@ -203,6 +255,12 @@ public final class RulesRuntime {
         machine.nativeCall = { [unowned self] t, ip, regs in self.nativeCall(target: t, from: ip, registers: &regs) }
         machine.eventSink = { [unowned self] e in self.handle(e) }
         x86.csRead = { [unowned self] a in self.csRead(a) }
+        // other segments of the load image (read only): the EXE bytes after the MZ header
+        let header = Int(exe[8]) | Int(exe[9]) << 8
+        x86.imageRead = { [exe] lin in
+            let o = header * 16 + lin
+            return lin >= 0 && o < exe.count ? exe[o] : nil
+        }
         x86.csWrite = { _, _ in }
         x86.callout = { [unowned self] x, ip, target, seg in self.callout(x, ip, target, seg) }
     }
@@ -481,14 +539,25 @@ public final class RulesRuntime {
             var name: String? = first.name
             var n = 0
             while let cur = name, n < 16 {
-                machine.watched = counterLabels
-                machine.callHook(cur)
-                if !machine.watchedHits.isEmpty { countedByHooks = true }
+                var stopIP: Int?
+                if program.direct {
+                    // the counting code ran if any of its instructions executed (the lifted check:
+                    // a block starting there ran)
+                    let watch = glue.routines["end_of_turn"].map { $0..<($0 + 24) }
+                    let res = runDirect(program.hooks[cur]!.entryIP, "hook \(cur)", watch: watch)
+                    if res.watchHit { countedByHooks = true }
+                    stopIP = res.stop
+                } else {
+                    machine.watched = counterLabels
+                    machine.callHook(cur)
+                    if !machine.watchedHits.isEmpty { countedByHooks = true }
+                    stopIP = machine.lastStopIP
+                }
                 n += 1
-                name = machine.lastStopIP.flatMap { program.hooks[cur]?.continues[$0] }
+                name = stopIP.flatMap { program.hooks[cur]?.continues[$0] }
                 // The cut is the call the lift could not express (EP6 cs:31D8 call 3BD4, the gate
                 // redraw; cs:31CB the idle text): run it from the EXE, then continue after it.
-                if name != nil, let stop = machine.lastStopIP, machine.code[stop] == 0xE8 {
+                if name != nil, let stop = stopIP, machine.code[stop] == 0xE8 {
                     let t = (stop + 3 + (Int(machine.code[stop + 1]) | Int(machine.code[stop + 2]) << 8)) & 0xFFFF
                     var regs: [String: UInt16] = [:]
                     _ = nativeCall(target: t, from: stop, registers: &regs)
@@ -515,9 +584,38 @@ public final class RulesRuntime {
     /// Runs a lifted hook if the table has it.
     @discardableResult
     public func hook(_ name: String) -> Bool {
-        guard program.hooks[name] != nil else { return false }
-        machine.callHook(name)
+        guard let h = program.hooks[name] else { return false }
+        if program.direct { runDirect(h.entryIP, "hook \(name)") } else { machine.callHook(name) }
         return true
+    }
+
+    /// Direct backend: runs rule code from the EXE at `entry` until `ret` at depth 0, the dispatcher
+    /// epilogue or a hook stop (rules.py's `@return` points), with every register 0 except the ones
+    /// `setup` sets (as the lifted graphs start). Returns the stop address reached, if any, and
+    /// whether an instruction in `watch` ran.
+    @discardableResult
+    func runDirect(_ entry: Int, _ what: String, watch: Range<Int>? = nil, setup: (MiniX86) -> Void = { _ in })
+        -> (result: MiniX86.Stop, stop: Int?, watchHit: Bool) {
+        let saved = x86.r, savedES = x86.es
+        let savedStops = x86.stops, savedEpi = x86.stopAtEpilogue, savedWatch = x86.watch, savedStopIP = x86.stopIP
+        x86.resetRegisters()
+        x86.r[4] = saved[4] == 0 ? MiniX86.initialSP : saved[4] &- 0x100
+        x86.stops = stopBitmap
+        x86.stopAtEpilogue = true
+        x86.watch = watch
+        x86.stopIP = nil
+        setup(x86)
+        directDepth += 1
+        let s = x86.run(from: entry, to: -1)
+        directDepth -= 1
+        let out = (s, x86.lastStop, x86.watchHit)
+        x86.r = saved; x86.es = savedES
+        x86.stops = savedStops; x86.stopAtEpilogue = savedEpi; x86.watch = savedWatch; x86.stopIP = savedStopIP
+        switch s {
+        case .completed, .returned, .halted: break
+        default: warn(String(format: "%@ (cs:%04X): %@", what, entry, s.description))
+        }
+        return out
     }
 
     /// Runs a glue range; nil if the table has no such range.
@@ -525,7 +623,9 @@ public final class RulesRuntime {
     public func runRange(_ name: String, di: Int? = nil) -> MiniX86.Stop? {
         guard let r = glue.range(name) else { return nil }
         let saved = x86.r, savedES = x86.es
-        defer { x86.r = saved; x86.es = savedES }
+        let savedStops = x86.stops, savedEpi = x86.stopAtEpilogue, savedWatch = x86.watch, savedDD = directDepth
+        x86.stops = nil; x86.stopAtEpilogue = false; x86.watch = nil; directDepth = 0
+        defer { x86.r = saved; x86.es = savedES; x86.stops = savedStops; x86.stopAtEpilogue = savedEpi; x86.watch = savedWatch; directDepth = savedDD }
         x86.resetRegisters()
         x86.r[4] = saved[4] == 0 ? MiniX86.initialSP : saved[4] &- 0x100
         if let di { x86.di = UInt16(truncatingIfNeeded: di) }
@@ -540,6 +640,9 @@ public final class RulesRuntime {
     @discardableResult
     func runRoutine(_ entry: Int, _ name: String) -> MiniX86.Stop {
         let saved = x86.r, savedES = x86.es
+        let savedStops = x86.stops, savedEpi = x86.stopAtEpilogue, savedWatch = x86.watch, savedDD = directDepth
+        x86.stops = nil; x86.stopAtEpilogue = false; x86.watch = nil; directDepth = 0
+        defer { x86.stops = savedStops; x86.stopAtEpilogue = savedEpi; x86.watch = savedWatch; directDepth = savedDD }
         x86.resetRegisters()
         x86.r[4] = saved[4] &- 0x100   // below the caller's frame
         let s = x86.run(from: entry, to: -1)
@@ -557,6 +660,11 @@ public final class RulesRuntime {
     /// from the EXE) with AX = value | lockout << 8 and BX = the handler address. EP2/EP10 exit
     /// through their dispatcher tail, which is rule code too (rules.md 4 item 3).
     public func dispatch(value v: Int, layer: UInt8, tilted: Bool, lockout: UInt8) {
+        if program.direct, let d = program.dispatcherIP {
+            // the dispatcher itself (filters, jump table, handler, tail) from the EXE
+            runDirect(d, "sensor dispatch \(String(format: "%02X", v))") { $0.ax = UInt16(truncatingIfNeeded: v | Int(lockout) << 8) }
+            return
+        }
         var pass = v >= 0xAA
         if pass {
             if layer == 1 { pass = program.level1Colours.contains(v) }
@@ -586,6 +694,12 @@ public final class RulesRuntime {
     /// Returns false when the table has no kicker hook (the engine then applies its own kick).
     public func kicker(ball i: Int, contact: UInt8) -> Bool {
         guard let k = program.hooks["kicker"] else { return false }
+        if program.direct {
+            // the probe loop's registers: DI = 2 x slot, ES:[BX] = the probed pixel
+            x86.contactColour = contact
+            runDirect(k.entryIP, "kicker") { $0.di = UInt16(2 * i); $0.es = MiniX86.contactSegment }
+            return true
+        }
         machine.contactColour = Int(contact)
         machine.call(k.entry, registers: ["di": 2 * i])
         return true
@@ -600,10 +714,16 @@ public final class RulesRuntime {
             return
         }
         runRange("fadeTail")
-        if let nb = nextBallSkillEntry { machine.watched = [nb] }
-        hook("ball_end")
-        let shortcut = nextBallSkillEntry.map { machine.watchedHits.contains($0) } ?? false
-        machine.watched = []
+        var shortcut = false
+        if program.direct {
+            let nb = program.hooks["next_ball_skill"]?.entryIP
+            shortcut = runDirect(program.hooks["ball_end"]!.entryIP, "hook ball_end", watch: nb.map { $0..<($0 + 1) }).watchHit
+        } else {
+            if let nb = nextBallSkillEntry { machine.watched = [nb] }
+            hook("ball_end")
+            shortcut = nextBallSkillEntry.map { machine.watchedHits.contains($0) } ?? false
+            machine.watched = []
+        }
         if shortcut { return }
         hook("bonus_count")
         hook("bonus_multiplier_payout")
@@ -691,39 +811,92 @@ public final class RulesRuntime {
         case k["nudge_b"]: return input.contains(.nudgeB) ? 1 : 0
         case k["up"], k["down"]: return 0
         case k["scancode"]: return 0x8C   // a key release: no pending menu key
-        default: return machine.code[a & 0xFFFF]
+        default:
+            // direct rule code: the flipper flags the lifted rules read as ["input", ...]
+            if directDepth > 0, let w = program.inputKeys[a] { return engine.map { UInt8($0.rulesInput(w)) } ?? 0 }
+            return machine.code[a & 0xFFFF]
         }
     }
 
-    private func callout(_ x: MiniX86, _ ip: Int, _ target: Int, _ farSeg: Int?) -> MiniX86.CallResult {
-        if let seg = farSeg, let api = glue.soundAPISegment, seg == api { return .handled }   // MASI driver
+    /// What a call from x86 code does (the callout's decision, shared with `directCodeReport`).
+    enum CallEffect: Equatable {
+        case none, sfx, lampUpdate, gameOver, ballLostFade, gates([Int]), liftedHook(Int), message, text, number, paletteStep
+    }
+
+    /// The callout's decision for a call to `target` (`farSeg` nil = near): run the callee, apply
+    /// an effect, stop, or unknown. `direct` = direct-backend rule code is running.
+    func classifyCall(_ target: Int, _ farSeg: Int?, direct: Bool) -> (MiniX86.CallResult, CallEffect) {
+        let csSeg = Int(x86.csValue)
+        if let seg = farSeg, let api = glue.soundAPISegment, seg == api { return (.handled, .none) }   // MASI driver
         let r = glue.routines
-        if target == r["sfx_play"] { sfxPlay(ax: Int(x.ax)); return .handled }
-        if target == r["idle_text"] || target == r["gate_top"] || glue.follow.contains(target) { return farSeg == nil ? .follow : .unknown }
-        if target == r["lamp_update"] { lampUpdate(phaseAddr: Int(x.si)); return .handled }
-        if target == r["pause_menu"] { gameOver = true; return .halt }
-        if target == r["ball_lost_fade"] { ballLostFade(); return .handled }
-        if let gs = gatesByRoutine[target] { for gi in gs { machine.drawGate(gi) }; return .handled }
-        if let h = hookByIP[target] { machine.call(h); return .handled }
-        if let stub = program.stubs[target] {
-            switch stub.kind {
-            case "message": startMessage(ds: Int(x.bx), ax: Int(x.ax), pos: Int(x.di))
-            case "text": pendingTexts.append(textRef(ds: Int(x.bx), pos: Int(x.di), routine: target))
-            case "number": machine.writeNumber(UInt32(x.dx) << 16 | UInt32(x.ax), buffer: Int(x.bx))
-            default: break   // score_refresh, dmd_clear: display only
-            }
-            return .handled
+        if target == r["sfx_play"] { return (.handled, .sfx) }
+        if target == r["idle_text"] || target == r["gate_top"] || glue.follow.contains(target) || program.gateRoutines.contains(target) {
+            return (farSeg == nil ? .follow : .unknown, .none)
         }
-        if target == r["text3"] { pendingTexts.append(textRef(ds: Int(x.bx), pos: Int(x.di), routine: target)); return .handled }
+        if target == r["lamp_update"] { return (.handled, .lampUpdate) }
+        if target == r["pause_menu"] { return (.halt, .gameOver) }
+        if target == r["ball_lost_fade"] { return (.handled, .ballLostFade) }
+        if let gs = gatesByRoutine[target] { return (.handled, .gates(gs)) }
+        if let h = hookByIP[target] {
+            if program.direct { return (farSeg == nil || farSeg == csSeg ? .follow : .unknown, .none) }
+            return (.handled, .liftedHook(h))
+        }
+        if let stub = program.stubs[target] {
+            // direct rule code runs num_to_text from the EXE (it writes the digits into DS)
+            if stub.kind == "number", direct { return (.follow, .none) }
+            switch stub.kind {
+            case "message": return (.handled, .message)
+            case "text": return (.handled, .text)
+            case "number": return (.handled, .number)
+            default: return (.handled, .none)   // score_refresh, dmd_clear: display only
+            }
+        }
+        if target == r["text3"] || textRoutines.contains(target) { return (.handled, .text) }
         for name in ["wait_frame", "wait_frame_far", "set_scroll", "draw_plunger", "pause_overlay", "split_line", "flipper_sprite",
                      "raster_bar", "restore_ball_bg", "save_ball_bg", "camera_update", "blit_list", "render_frame"] where r[name] == target {
-            return .handled
+            return (.handled, .none)
         }
-        if let pc = paletteCycle, target == pc.routine || target == pc.waitRoutine { paletteCycleStep(); return .handled }
-        if isDisplayRoutine(target) { return .handled }
+        if let pc = paletteCycle, target == pc.routine || target == pc.waitRoutine { return (.handled, .paletteStep) }
+        if isDisplayRoutine(target) { return (.handled, .none) }
         // Inside a rule-code `call` (EP10 cs:341B -> cs:358A num_to_text): execute the callee.
-        if nativeDepth > 0, farSeg == nil { return .follow }
-        return .unknown
+        if nativeDepth > 0, farSeg == nil { return (.follow, .none) }
+        // Direct rule code: gosubs and the lifted backend's `call` ops (far calls into the code segment too).
+        if direct, farSeg == nil || farSeg == csSeg { return (.follow, .none) }
+        return (.unknown, .none)
+    }
+
+    private func callout(_ x: MiniX86, _ ip: Int, _ target: Int, _ farSeg: Int?) -> MiniX86.CallResult {
+        let (res, eff) = classifyCall(target, farSeg, direct: directDepth > 0)
+        switch eff {
+        case .none: break
+        case .sfx: sfxPlay(ax: Int(x.ax))
+        case .lampUpdate: lampUpdate(phaseAddr: Int(x.si))
+        case .gameOver: gameOver = true
+        case .ballLostFade: ballLostFade()
+        case let .gates(gs): for gi in gs { machine.drawGate(gi) }
+        case let .liftedHook(h): machine.call(h)
+        case .message: startMessage(ds: Int(x.bx), ax: Int(x.ax), pos: Int(x.di))
+        case .text: pendingTexts.append(textRef(ds: Int(x.bx), pos: Int(x.di), routine: target))
+        case .number: machine.writeNumber(UInt32(x.dx) << 16 | UInt32(x.ax), buffer: Int(x.bx))
+        case .paletteStep: paletteCycleStep()
+        }
+        return res
+    }
+
+    /// Routines that append a text line to the active dot message (EP1 draw_text cs:59AC / draw_text_hi
+    /// cs:5926, EP10 cs:4C65 / 4CFB / 4D93): `[mov al,[c]; mov cs:[x],al;] mov ax,ds; mov es,ax;
+    /// push ds; mov ax,SEG; mov ds,ax; mov si,[P]; mov word [P],0; pop ds` (P = the message's line
+    /// pointer in the display segment). rules.json lists only the ones rule code calls; glue and
+    /// natively run code (EP10 cs:341B, the end-of-ball score panel) call others.
+    static func textRoutines(code c: [UInt8]) -> Set<Int> {
+        var out = Set<Int>()
+        for i in 0..<(0x10000 - 22) where c[i] == 0x8C && c[i + 1] == 0xD8 && c[i + 2] == 0x8E && c[i + 3] == 0xC0 && c[i + 4] == 0x1E
+            && c[i + 5] == 0xB8 && c[i + 8] == 0x8E && c[i + 9] == 0xD8 && c[i + 10] == 0x8B && c[i + 11] == 0x36
+            && c[i + 14] == 0xC7 && c[i + 15] == 0x06 && c[i + 16] == c[i + 12] && c[i + 17] == c[i + 13]
+            && c[i + 18] == 0 && c[i + 19] == 0 && c[i + 20] == 0x1F {
+            if i >= 7, c[i - 7] == 0xA0, c[i - 4] == 0x2E, c[i - 3] == 0xA2 { out.insert(i - 7) } else { out.insert(i) }
+        }
+        return out
     }
 
     private var displayRoutineCache: [Int: Bool] = [:]

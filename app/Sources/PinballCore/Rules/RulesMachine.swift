@@ -413,7 +413,7 @@ public final class RulesMachine {
         case let .gate(i):
             drawGate(i)
         case let .message(m, pos, mode):
-            emit(.message(ds: Int(eval(m) & 0xFFFF), mode: mode, pos: Int(eval(pos) & 0xFFFF)))
+            emit(.message(ds: Int(eval(m) & 0xFFFF), mode: Int(eval(mode) & 0xFFFF), pos: Int(eval(pos) & 0xFFFF)))
         case let .text(m, pos, routine):
             emit(.text(ds: Int(eval(m) & 0xFFFF), pos: Int(eval(pos) & 0xFFFF), routine: routine))
         case let .numberText(v, buf):

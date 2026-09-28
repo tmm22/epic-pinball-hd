@@ -47,6 +47,53 @@ public final class ClassicComposer {
     /// Flipper sprite frames by `EngineData.flippers` index (resolved by name from graphics).
     public let flipperFrames: [[IndexedSprite]?]
 
+    // MARK: enhanced-renderer bookkeeping (never changes what is drawn into `vram`/`strip`)
+
+    /// One opaque VRAM blit (or a reset to the bare playfield), in the order the game makes
+    /// them. The HD renderer replays these into its high-resolution VRAM.
+    public enum VRAMOp: Sendable, Equatable {
+        case reset
+        case blit(name: String, x: Int, y: Int, w: Int, h: Int, clipBottom: Int)
+    }
+    /// Ops since the last `takePendingVRAMOps()`, recorded only while `recordsVRAMOps` is set.
+    public private(set) var pendingVRAMOps: [VRAMOp] = []
+    public var recordsVRAMOps = false { didSet { if !recordsVRAMOps { pendingVRAMOps = [] } } }
+    /// Blits since the last reset, compacted (a blit drops earlier ones it fully covers):
+    /// replaying them over the playfield reproduces `vram`.
+    public private(set) var liveVRAMOps: [VRAMOp] = []
+    public func takePendingVRAMOps() -> [VRAMOp] { defer { pendingVRAMOps = [] }; return pendingVRAMOps }
+
+    /// What `buildStrip` drew on top of the plain panel, for the HD strip.
+    public enum StripOp: Sendable, Equatable {
+        /// font8 glyph `glyph` (index from ' ') with its top-left cell corner at x, y (7 rows drawn).
+        case glyph(glyph: Int, x: Int, y: Int, colour: UInt8)
+        case sprite(name: String, x: Int, y: Int)
+        case dot(x: Int, y: Int, colour: UInt8)
+    }
+    public private(set) var stripOps: [StripOp] = []
+    /// The strip after the panel fills, before text, digits and dots.
+    public private(set) var stripBackground: [UInt8]
+    /// Incremented whenever the strip is rebuilt.
+    public private(set) var stripGeneration = 0
+    /// Ball 0's own 15x14 indices (engine.json), 0 = transparent; nil without engine data.
+    public let ballPixels: [UInt8]?
+    public let ballSize: (w: Int, h: Int)
+
+    /// Per ball level (0, 1), per collision index: the index hides the ball (ball_pixel_scan's
+    /// occlusion classes; EP8's dynamic level-0 bounds at their initial values).
+    public let occludes: [[Bool]]?
+
+    static func occlusionClasses(_ o: EngineData.OcclusionTable) -> [[Bool]] {
+        var out = o.lut.map { row in row.map { o.codes.indices.contains($0) && o.codes[$0] == "occludes_ball" } }
+        if let ini = o.level0BoundsInitial, !out.isEmpty {
+            out[0] = (0..<256).map { $0 > ini.frontMax && $0 <= ini.occludesMax }
+        }
+        return out
+    }
+
+    /// Which record lamp slot `k` shows: true "a", false "b", nil nothing drawn since boot.
+    public func lampRecordShown(_ k: Int) -> Bool? { k >= 0 && k < lampShown.count ? lampShown[k] : nil }
+
     public init(graphics: GameGraphics, spec: StripSpec, exe: TableExe?, playfield: [UInt8], engine: EngineData? = nil) {
         precondition(playfield.count == TableGeometry.width * TableGeometry.height)
         self.graphics = graphics
@@ -55,6 +102,10 @@ public final class ClassicComposer {
         self.base = playfield
         self.vram = playfield
         self.strip = [UInt8](repeating: spec.fill, count: TableGeometry.width * Self.stripBufferRows)
+        self.stripBackground = [UInt8](repeating: spec.fill, count: TableGeometry.width * Self.stripBufferRows)
+        self.ballPixels = engine?.ball.pixels
+        self.ballSize = (engine?.ball.w ?? 15, engine?.ball.h ?? 14)
+        self.occludes = engine.map { Self.occlusionClasses($0.occlusion) }
         self.overlay = [UInt8](repeating: 0, count: TableGeometry.width * Self.overlayRows)
         self.lampShown = Array(repeating: nil, count: graphics.lampCount)
         self.flipperFrames = (engine?.flippers ?? []).map { f -> [IndexedSprite]? in
@@ -97,11 +148,20 @@ public final class ClassicComposer {
             }
         }
         markDirty(y0, y0 + s.h)
+        let op = VRAMOp.blit(name: s.name, x: x0, y: y0, w: s.w, h: s.h, clipBottom: bottom)
+        if recordsVRAMOps { pendingVRAMOps.append(op) }
+        liveVRAMOps.removeAll { old in
+            guard case let .blit(_, ox, oy, ow, oh, oc) = old else { return false }
+            return ox >= x0 && oy >= y0 && ox + ow <= x0 + s.w && min(oy + oh, oc) <= min(y0 + s.h, bottom)
+        }
+        liveVRAMOps.append(op)
     }
 
     /// Back to the bare playfield (nothing drawn).
     public func reset() {
         vram = base
+        if recordsVRAMOps { pendingVRAMOps.append(.reset) }
+        liveVRAMOps = []
         lampShown = Array(repeating: nil, count: graphics.lampCount)
         flipperShown = [:]
         plungerShown = nil
@@ -209,6 +269,7 @@ public final class ClassicComposer {
             let x0 = (cell < 40 ? cell : cell - 40) * 8
             if g < graphics.font8.count {
                 let glyph = graphics.font8[g]
+                stripOps.append(.glyph(glyph: g, x: x0, y: row0, colour: colour))
                 for r in 0..<min(7, glyph.count) {
                     let y = row0 + r
                     guard y < Self.stripBufferRows else { continue }
@@ -223,6 +284,7 @@ public final class ClassicComposer {
     }
 
     func stripBlit(_ s: IndexedSprite, x: Int, y: Int) {
+        stripOps.append(.sprite(name: s.name, x: x, y: y))
         for r in 0..<s.h {
             let ty = y + r
             guard ty >= 0, ty < Self.stripBufferRows else { continue }
@@ -286,10 +348,16 @@ public final class ClassicComposer {
             }
         }
 
+        stripBackground = strip
+        stripOps = []
+        stripGeneration &+= 1
         if dmd {
             for (i, d) in dots.enumerated() {
                 let y = d / width, x = d % width
-                if d >= 0, y < Self.stripBufferRows { strip[y * width + x] = colours[i] }
+                if d >= 0, y < Self.stripBufferRows {
+                    strip[y * width + x] = colours[i]
+                    stripOps.append(.dot(x: x, y: y, colour: colours[i]))
+                }
             }
         } else if !tilted {
             // dmd_idle_text: the ball-number and player-number strings, digits patched in as the code does.

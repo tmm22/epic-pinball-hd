@@ -160,6 +160,20 @@ public final class ClassicEngine {
     /// Why `EngineAssets.makeEngine` could not attach rules (nil if attached or not requested).
     public var rulesLoadError: String?
 
+    // MARK: Hooks for other ball physics (Enhanced/BallPhysics.swift). None of these change the
+    // classic path: with `ballPhysics == nil` the engine runs exactly as before.
+
+    /// Replaces `physicsStep()` and the main loop's integer gravity add (nil = the original engine).
+    public var ballPhysics: BallPhysics?
+    /// When non-nil, every collision-buffer write that is not a flipper outline (gates, rule code)
+    /// appends its linear offset here, so a model can update derived collision data.
+    public var bufferWriteLog: [Int]?
+    /// Incremented whenever the whole collision buffer is replaced (power-on reset).
+    public private(set) var bufferGeneration = 0
+    /// Sensor dispatches (ball_pixel_scan -> handler) since power-on, in total and per colour.
+    public private(set) var sensorDispatchCount = 0
+    public private(set) var sensorHits = [Int](repeating: 0, count: 256)
+
     public init(data: EngineData, startBuffer: [UInt8]) throws {
         guard startBuffer.count == TableGeometry.width * TableGeometry.height else {
             throw EngineDataError.invalid("collision buffer has \(startBuffer.count) bytes, expected 128000")
@@ -219,6 +233,9 @@ public final class ClassicEngine {
     /// (2 in every table) with that outline recorded as drawn, no balls.
     public func resetToPowerOn() {
         buffer = startBuffer
+        bufferGeneration += 1
+        sensorDispatchCount = 0
+        sensorHits = [Int](repeating: 0, count: 256)
         balls = [BallState](repeating: BallState(), count: 5)
         if let slots = data.ballSlotsInitial {
             for (i, sl) in slots.prefix(5).enumerated() {
@@ -337,7 +354,7 @@ public final class ClassicEngine {
         let steps = data.timing.stepsPerFrame
         for s in 0..<steps {
             if s == gravityPhase { frameLogic() }
-            physicsStep()
+            if let bp = ballPhysics { bp.step(self) } else { physicsStep() }
             onStep?(frameCount, s, lastStep)
         }
         if gravityPhase >= steps { frameLogic() }
@@ -397,7 +414,10 @@ public final class ClassicEngine {
         let closed = dsRead(fv, 1) == 1
         let v = UInt8(truncatingIfNeeded: (closed ? g.valueClosed : g.valueOpen) ?? 0)
         let base = (px.half ?? 0) * 64000
-        for o in offs where base + o < buffer.count { buffer[base + o] = v }
+        for o in offs where base + o < buffer.count {
+            buffer[base + o] = v
+            bufferWriteLog?.append(base + o)
+        }
         if let sv = g.sideVar, let a = Self.hexAddr(sv.var) { dsWrite(a, 1, closed ? sv.closed : sv.open) }
     }
 
@@ -577,7 +597,16 @@ public final class ClassicEngine {
         let cutoff = Int16(truncatingIfNeeded: data.gravity.cutoff)
         let perBall = data.sensors.lockoutPerBall != nil
         for i in 0..<min(5, data.gravity.slots ?? 5) where balls[i].active != 0 {
-            if balls[i].vy <= cutoff {
+            if balls[i].vy <= cutoff, let bp = ballPhysics {
+                // Same sum as below (16-bit wrapping adds are associative); the model may take it.
+                var g = params[9] &+ extraGravity
+                for t in extraGravityTerms {
+                    let v = Int16(truncatingIfNeeded: dsRead(t.addr, 2))
+                    g = t.sub ? g &- v : g &+ v
+                }
+                if let sb = data.gravity.slotBonus, sb.slot == i { g &+= Int16(truncatingIfNeeded: sb.add) }
+                if !bp.frameGravity(self, ball: i, amount: g) { balls[i].vy &+= g }
+            } else if balls[i].vy <= cutoff {
                 balls[i].vy &+= params[9] &+ extraGravity
                 for t in extraGravityTerms {
                     let v = Int16(truncatingIfNeeded: dsRead(t.addr, 2))
@@ -631,6 +660,8 @@ public final class ClassicEngine {
     }
 
     func dispatchSensor(_ v: Int) {
+        sensorDispatchCount += 1
+        sensorHits[v & 0xFF] += 1
         if let r = rules, rulesMode != .off {
             r.dispatch(value: v, layer: curLayer, tilted: tilted, lockout: eventLockout)
             return
@@ -826,7 +857,19 @@ public final class ClassicEngine {
     }
 
     /// Collision-buffer write for rule code (gates, diverters).
-    func setBufferByte(_ i: Int, _ v: UInt8) { buffer[i] = v }
+    func setBufferByte(_ i: Int, _ v: UInt8) {
+        buffer[i] = v
+        bufferWriteLog?.append(i)
+    }
+
+    /// Ends a step run by a `BallPhysics` model: records its report and counts the step.
+    public func finishExternalStep(_ report: StepReport) {
+        lastStep = report
+        stepCount += 1
+    }
+
+    /// Sets the probe hit list a model computed (read by rule glue as the hit count).
+    func setHitList(_ hits: [UInt8]) { hitList = hits }
 
     @inline(__always)
     func pixel(_ linear: Int) -> UInt8 {

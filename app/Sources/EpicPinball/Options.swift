@@ -53,6 +53,23 @@ struct Options {
     var balls = 3
     var requireRules = false
     var autopilot = false
+    // Front end
+    var launcher = false
+    var forceImport = false
+    var supportDir: String?
+    var uiSnapshot: String?
+    var uiScreen = "launcher"
+    var autostart = false
+    var importFrom: String?
+    /// Ball physics (`--physics`): classic = the bit-exact integer engine, enhanced = EnhancedPhysics.
+    var physics: GameSettings.PhysicsMode = .classic
+
+    /// Start straight into a table (the behaviour of earlier builds, used by the smoke tests and
+    /// developer flags); otherwise the launcher (or the import screen on first launch) opens.
+    var directPlay: Bool {
+        !launcher && !forceImport && (tableGiven || exitAfter != nil || windowCapture != nil || demo || autopilot
+            || hasPresentationFlags || message != nil || legacyWindow)
+    }
 
     /// The game options PINBALL.EXE would pass (players, balls; sounds on, card present).
     var rulesOptions: RulesOptions {
@@ -90,8 +107,10 @@ struct Options {
       --hold-plunger N hold the plunger for N frames and keep holding (after --launch)
       --flip SIDE      hold flipper button(s) during --sim-time (left, right, both)
       --no-sprites     pure playfield: no ball, flippers, overlays or strip (legacy window)
-      --mode M         classic (bit-exact, integer ball position) or enhanced (same physics,
-                       ball drawn at interpolated sub-pixel positions)
+      --mode M         classic (integer ball position) or enhanced (ball drawn at interpolated
+                       sub-pixel positions); presentation only
+      --physics P      classic (the bit-exact integer engine, default) or enhanced (EnhancedPhysics);
+                       window, --snapshot and --autoplay
       --scenario FILE  snapshot: start from a trace scenario instead of a served ball
       --frames N       snapshot: run N original frames (overrides --sim-time)
 
@@ -136,6 +155,20 @@ struct Options {
       --autopilot      window: the auto-player plays (plunge and flip) until you press a game key
       --require-rules  trace mode: fail if rules.json does not load (instead of a warning)
 
+    front end (window):
+      without --table (and the smoke-test / demo flags) the launcher opens: table picker, settings,
+      high scores; on first launch (no library and no --data) the import screen.
+      --launcher       open the launcher even with --table (that table preselected)
+      --import         open the import screen
+      --support-dir D  use D instead of ~/Library/Application Support/EpicPinballHD (settings,
+                       high scores, imported library)
+      --ui-snapshot P  render a front-end screen offscreen to PNG P and exit
+      --ui-screen S    launcher (default), import, settings, pause, initials or gameover (with --size WxH)
+      --import-from P  open the import screen and import P (.iso file or folder) without the file panel
+      --autostart      with --launcher: press Play on the selected table at once (smoke test of the
+                       picker -> game path; --exit-after/--window-capture then apply to the game, or
+                       to the launcher window when no game starts)
+
     window smoke test:
       --exit-after S       quit the windowed app after S seconds, printing frame stats
       --window-capture P   with --exit-after: save the last presented drawable as PNG
@@ -145,7 +178,8 @@ struct Options {
           Enter show/hide the display strip, P pause, M music on/off, S effects on/off,
           - / = master volume, [ / ] music volume, R new game (new ball without rules),
           Tab full table, A pixel aspect, E classic/enhanced, F cycle upscale filter,
-          Esc or Cmd-Q quit
+          Esc menu (resume, new game, settings, choose table, quit), Cmd-Q quit.
+          All game keys can be changed in Settings > Controls; game controllers work too.
     """
 
     enum ParseError: Error, CustomStringConvertible {
@@ -292,6 +326,22 @@ struct Options {
                 o.balls = n
             case "--require-rules": o.requireRules = true
             case "--autopilot": o.autopilot = true
+            case "--launcher": o.launcher = true
+            case "--import": o.forceImport = true
+            case "--autostart": o.autostart = true
+            case "--import-from": o.importFrom = try value(a); o.forceImport = true
+            case "--physics":
+                let v = try value(a)
+                guard let p = GameSettings.PhysicsMode(rawValue: v) else { throw ParseError.message("--physics must be classic or enhanced") }
+                o.physics = p
+            case "--support-dir": o.supportDir = try value(a)
+            case "--ui-snapshot": o.uiSnapshot = try value(a)
+            case "--ui-screen":
+                let v = try value(a)
+                guard ["launcher", "import", "settings", "pause", "initials", "gameover"].contains(v) else {
+                    throw ParseError.message("--ui-screen must be launcher, import, settings, pause, initials or gameover")
+                }
+                o.uiScreen = v
             case "-h", "--help": throw ParseError.help
             default:
                 // Ignore flags macOS may inject when launched from Finder/Xcode (-NSDocumentRevisionsDebugMode, -psn_...).

@@ -91,7 +91,7 @@ public enum ROp: Sendable, Equatable {
     case asm(ip: Int)
     case gate(Int)
     /// dot-matrix message: string (DS offset), DI position, AX mode (AH font/centring, AL effect).
-    case message(RExpr, pos: RExpr, mode: Int)
+    case message(RExpr, pos: RExpr, mode: RExpr)
     /// score-strip text: string (DS offset), DI position, drawing routine (cs offset).
     case text(RExpr, pos: RExpr, routine: Int)
     case numberText(RExpr, RExpr)
@@ -202,6 +202,20 @@ public struct RulesProgram: Sendable {
     public var maskedRegisters: [Bool]
     /// Blocks that contain an `asm` op (their handler/hook must run from the EXE).
     public var nativeBlocks: Set<Int> = []
+    /// Built by `RulesProgram.discover` for the direct-EXE backend: no blocks, every handler and
+    /// hook runs from the EXE (`RulesBackend.direct`).
+    public var direct = false
+    /// Direct backend: every hook stop (rules.py `Lifter.stops`: lifted code returns there whichever
+    /// graph reaches it).
+    public var hookStops: Set<Int> = []
+    /// Direct backend: DS variables holding the playfield segments (collision.json top/bottom_seg_var).
+    public var segmentVars: [Int: Int] = [:]
+    /// Direct backend: the collision-buffer gate routines (rules.json `gates[].routine`), executed
+    /// from the EXE wherever they are called.
+    public var gateRoutines: Set<Int> = []
+    /// Direct backend: CS keyboard flags rule code reads as flipper keys (rules.json `["input", ...]`):
+    /// cs offset -> 0 left, 1 right.
+    public var inputKeys: [Int: Int] = [:]
 
     /// Address of a named variable (`vars`, then `engine_vars`, then `name.hi` = +2).
     public func address(of name: String) -> Var? {
@@ -414,7 +428,9 @@ private struct Builder {
             guard let g = o["gate"] as? String, let i = gateIndex[g] else { throw RulesError.invalid("unknown gate") }
             return .gate(i)
         case "message":
-            return .message(try expr(o["msg"]), pos: try position(o["pos"]), mode: Self.int(o["mode"]) ?? 0)
+            // `mode` is AX at the call: a constant, or an expression (EP8 L2975, EP13 L2372: ["reg", "ax"])
+            let mode: RExpr = o["mode"] is [Any] ? try expr(o["mode"]) : .k(Int64(Self.int(o["mode"]) ?? 0))
+            return .message(try expr(o["msg"]), pos: try position(o["pos"]), mode: mode)
         case "text":
             return .text(try expr(o["msg"]), pos: try position(o["pos"]), routine: Self.int(o["routine"]) ?? 0)
         case "number_text":

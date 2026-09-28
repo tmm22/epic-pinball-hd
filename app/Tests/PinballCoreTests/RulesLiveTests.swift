@@ -14,6 +14,8 @@ import XCTest
 ///   resolved by name from rules.json.
 /// * `testUserTablesRunAFullGame`: EP1, EP2 and EP10 rules load, validate and play 3000 frames
 ///   without interpreter faults, with a consistent PresentationState.
+///
+/// Every check runs on both rules backends (rules.json interpreted, and the direct-EXE backend).
 final class RulesLiveTests: XCTestCase {
     static let project = DataLocator.packageRelativeDefault.deletingLastPathComponent()
     static let dataRoot = DataLocator.packageRelativeDefault
@@ -25,6 +27,15 @@ final class RulesLiveTests: XCTestCase {
             guard fm.fileExists(atPath: Self.dataRoot.appendingPathComponent(f).path) else { throw XCTSkip("no extracted \(f)") }
         }
         guard RulesRuntime.locateEXE(dataRoot: Self.dataRoot, table: n) != nil else { throw XCTSkip("no original/EP\(n).EXE") }
+    }
+
+    /// An engine for table `n` with `backend`'s rules attached (inactive until a scenario/game).
+    func engine(_ n: Int, _ backend: RulesBackend) throws -> ClassicEngine {
+        let e = try EngineAssets.makeEngine(dataRoot: Self.dataRoot, table: n, rules: false)
+        let r = try RulesRuntime.load(dataRoot: Self.dataRoot, table: n, backend: backend)
+        XCTAssertEqual(r.backend, backend)
+        r.attach(to: e, mode: .off)
+        return e
     }
 
     func requireHarness() throws {
@@ -77,18 +88,20 @@ final class RulesLiveTests: XCTestCase {
         }
         if names.isEmpty { throw XCTSkip("no scenarios in tools/emu/") }
         try runPython([Self.project.appendingPathComponent("tools/emu/run_scenario.py").path, "--batch", outDir.path, scnDir.path])
-        let engine = try EngineAssets.makeEngine(dataRoot: Self.dataRoot, table: 1)
-        XCTAssertNotNil(engine.rules, engine.rulesLoadError ?? "")
-        var compared = 0
-        for name in names {
-            guard let ref = try? String(contentsOf: outDir.appendingPathComponent(name + ".jsonl"), encoding: .utf8) else { continue }
-            let sc = try Scenario.load(contentsOf: scnDir.appendingPathComponent(name + ".json"))
-            let port = DifferentialTests.parseLines(TraceRunner.run(sc, engine: engine))
-            if let msg = DifferentialTests.compare(reference: DifferentialTests.parseLines(ref), port: port) { XCTFail("\(name): \(msg)") }
-            XCTAssertEqual(engine.rules?.machine.faults ?? [], [], name)
-            compared += 1
+        for backend in RulesBackend.allCases {
+            let engine = try engine(1, backend)
+            var compared = 0
+            for name in names {
+                guard let ref = try? String(contentsOf: outDir.appendingPathComponent(name + ".jsonl"), encoding: .utf8) else { continue }
+                let sc = try Scenario.load(contentsOf: scnDir.appendingPathComponent(name + ".json"))
+                let port = DifferentialTests.parseLines(TraceRunner.run(sc, engine: engine))
+                if let msg = DifferentialTests.compare(reference: DifferentialTests.parseLines(ref), port: port) { XCTFail("\(backend) \(name): \(msg)") }
+                XCTAssertEqual(engine.rules?.machine.faults ?? [], [], "\(backend) \(name)")
+                compared += 1
+            }
+            XCTAssertEqual(compared, names.count, "the harness wrote a trace for every scenario")
+            XCTAssertEqual(engine.rules?.warnings ?? [], [], "\(backend)")
         }
-        XCTAssertEqual(compared, names.count, "the harness wrote a trace for every scenario")
     }
 
     // MARK: - rule state, sounds and messages frame by frame
@@ -215,9 +228,10 @@ final class RulesLiveTests: XCTestCase {
     func testRuleStateMatchesOriginalLive() throws {
         try requireTable(1)
         try requireHarness()
-        let engine = try EngineAssets.makeEngine(dataRoot: Self.dataRoot, table: 1)
-        let rules = try XCTUnwrap(engine.rules, engine.rulesLoadError ?? "")
-        let p = rules.program
+        // variable names (EP1's annotation) resolve through rules.json; both backends are compared
+        let named = try EngineAssets.makeEngine(dataRoot: Self.dataRoot, table: 1)
+        let rules = try XCTUnwrap(named.rules, named.rulesLoadError ?? "")
+        let p = try RulesProgram.load(contentsOf: RulesRuntime.rulesURL(dataRoot: Self.dataRoot, table: 1))
         func addr(_ spec: String) throws -> (Int, Int) {
             var name = spec, off = 0
             if let plus = spec.lastIndex(of: "+"), let o = Int(spec[spec.index(after: plus)...]) { name = String(spec[..<plus]); off = o }
@@ -262,6 +276,10 @@ final class RulesLiveTests: XCTestCase {
         var skip = [Bool](repeating: false, count: p.dsSize)
         for r in Self.ignored { for a in r where a < p.dsSize { skip[a] = true } }
         func ints(_ v: Any?) -> [[Int]] { (v as? [[Any]] ?? []).map { $0.compactMap { ($0 as? NSNumber)?.intValue } } }
+        for backend in RulesBackend.allCases {
+        let engine = try engine(1, backend)
+        let rules = try XCTUnwrap(engine.rules)
+        XCTAssertEqual(rules.program.dsSize, p.dsSize)
         var totalFrames = 0
         for entry in job {
             let name = entry["name"] as! String
@@ -279,17 +297,20 @@ final class RulesLiveTests: XCTestCase {
                 for pair in ints(ex["ds"]) where !skip[pair[0]] { b[pair[0]] = UInt8(pair[1]) }
                 let diffs = a == b ? [] : (0..<p.dsSize).filter { a[$0] != b[$0] }
                 if !diffs.isEmpty {
-                    XCTFail("\(name) frame \(f): DS differs at " + diffs.prefix(6).map { String(format: "ds:%04X orig %d port %d", $0, a[$0], b[$0]) }.joined(separator: ", "))
+                    XCTFail("\(backend) \(name) frame \(f): DS differs at " + diffs.prefix(6).map { String(format: "ds:%04X orig %d port %d", $0, a[$0], b[$0]) }.joined(separator: ", "))
                     break
                 }
                 if ints(orig[f]["sfx"]) != ints(ex["sfx"]) || ints(orig[f]["msg"]) != ints(ex["msg"]) {
-                    XCTFail("\(name) frame \(f): calls differ: original sfx \(ints(orig[f]["sfx"])) msg \(ints(orig[f]["msg"])), port sfx \(ints(ex["sfx"])) msg \(ints(ex["msg"]))")
+                    XCTFail("\(backend) \(name) frame \(f): calls differ: original sfx \(ints(orig[f]["sfx"])) msg \(ints(orig[f]["msg"])), port sfx \(ints(ex["sfx"])) msg \(ints(ex["msg"]))")
                     break
                 }
                 totalFrames += 1
             }
         }
-        XCTAssertGreaterThan(totalFrames, 5000)
+        XCTAssertGreaterThan(totalFrames, 5000, "\(backend)")
+        XCTAssertEqual(rules.warnings, [], "\(backend)")
+        print("rule state vs original, \(backend) backend: \(totalFrames) frames identical")
+        }
     }
 
     // MARK: - glue discovery
@@ -327,7 +348,8 @@ final class RulesLiveTests: XCTestCase {
         var ran = 0
         for n in [1, 2, 10] {
             do { try requireTable(n) } catch { continue }
-            let engine = try EngineAssets.makeEngine(dataRoot: Self.dataRoot, table: n)
+            for backend in RulesBackend.allCases {
+            let engine = try engine(n, backend)
             let r = try XCTUnwrap(engine.rules, "EP\(n): \(engine.rulesLoadError ?? "")")
             if n == 1 {
                 XCTAssertEqual(r.glue.ranges.count, 18, "EP1 glue ranges all decode: \(r.glue.warnings)")
@@ -365,6 +387,7 @@ final class RulesLiveTests: XCTestCase {
             XCTAssertGreaterThan(sounds, 0, "EP\(n) made sounds (flipper sounds at least)")
             if n != 2 { XCTAssertGreaterThan(messages, 0, "EP\(n) showed messages") }
             ran += 1
+            }
         }
         if ran == 0 { throw XCTSkip("no user tables with rules.json") }
     }
