@@ -93,7 +93,10 @@ find "$RES_BUNDLE" -name '*.metal' -exec cp {} "$APP/Contents/Resources/" \;
 say "icon"
 ICONSET="$OUT/.icon/AppIcon.iconset"
 rm -rf "$OUT/.icon"; mkdir -p "$OUT/.icon"
-swift "$APPDIR/Resources/make_icon.swift" "$ICONSET" >/dev/null
+# Compile rather than interpret: the swift.org toolchains' script JIT does not load AppKit
+# (NSBitmapImageRep symbols not found), while a compiled binary links it on every toolchain.
+swiftc -O -o "$OUT/.icon/make_icon" "$APPDIR/Resources/make_icon.swift"
+"$OUT/.icon/make_icon" "$ICONSET" >/dev/null
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "$OUT/.icon"
 

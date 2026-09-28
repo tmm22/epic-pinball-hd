@@ -30,9 +30,13 @@ Status:
 
 ## Requirements
 
-- macOS 14 or later on Apple silicon (tested with Swift 6.3 / Xcode 26.6)
-- Swift toolchain (Xcode or Command Line Tools). The shader is compiled at runtime, so
-  you do not need the offline Metal compiler. `libopenmpt` (Homebrew) for music.
+- macOS 14 or later on Apple silicon (tested with Swift 6.4 via swiftly, and Swift 6.3.3 /
+  Xcode 26.6)
+- Swift 6.x toolchain (Xcode, Command Line Tools, or swift.org via swiftly). The repo's
+  `.swift-version` pins swiftly to 6.4.0. An older default toolchain fails with
+  "tools version '6.0' is not valid"; check `swift --version`, and run `swiftly use 6.4.0`
+  if needed. After switching compilers, delete `app/.build` once. The shader is compiled at
+  runtime, so you do not need the offline Metal compiler. `libopenmpt` (Homebrew) for music.
 - Your game files, either way:
   - **No Python needed:** import your CD image or install with the app (first launch opens the
     import screen), or headless: `EpicPinball --headless-import CD.iso [--library DIR]`. The Swift
