@@ -36,13 +36,70 @@ include, and is not, the game Epic Pinball.
   original data is laid out. They were written by analysing a legally owned
   copy, for interoperability with this reimplementation.
 
+===============================================================================
+WHERE TO BUY EPIC PINBALL LEGALLY
+===============================================================================
+
+  GOG.com, "Epic Pinball: The Complete Collection" (DRM-free; Windows, macOS
+  and Linux; all three Epic Pinball sets plus a bonus table):
+  https://www.gog.com/en/game/epic_pinball_the_complete_collection
+
+  An original Epic MegaGames CD or floppy release that you own also works.
+
+===============================================================================
+HOW TO USE YOUR LEGAL COPY WITH THIS PROJECT
+===============================================================================
+
+1. Get the game from the source above and install it, or have your original
+   disc ready.
+
+2. Build the app (see README.md): run tools/package_app.sh, then open
+   build/EpicPinballHD.app.
+
+3. On first launch the app shows an import screen. Choose ONE of these:
+
+   a. Original CD: the mounted disc, or a disc image you made of your own
+      disc (.iso, .bin or .img).
+   b. Installed DOS copy: the folder that contains EP1.EXE, SFX1.PIN,
+      SONG1.PSM and so on (for example a copy of C:\EPIC).
+   c. GOG, macOS version: install it with GOG Galaxy or the offline macOS
+      installer, then choose the installed game (its .app or folder). The
+      importer searches up to 6 folder levels deep, including inside .app
+      bundles and .gog/.iso disc images.
+   d. GOG, Windows installer on a Mac: unpack it first, for example with
+      "brew install innoextract" and then
+      "innoextract setup_epic_pinball_*.exe -d EpicPinballGOG", and choose
+      the EpicPinballGOG folder.
+
+   From the command line instead:
+       EpicPinball --headless-import /path/to/your/copy
+
+4. The import takes a few seconds. It only reads your copy and never changes
+   it. The imported data is written to
+   ~/Library/Application Support/EpicPinballHD/. To remove it, delete that
+   folder.
+
+The GOG edition has not been tested directly by this project. If the import
+reports "no Epic Pinball table files", please open an issue that describes
+your folder layout (file names only). Never attach or upload game files.
+
+===============================================================================
+DISCLAIMER
+===============================================================================
+
 Epic Pinball and all of its original content (artwork, music, sound effects,
 table designs, rules, text and program code) are the property of their
 respective copyright and trademark holders. The game was developed by Digital
 Extremes and published by Epic MegaGames (now Epic Games). This project is not
 affiliated with, endorsed by, or sponsored by Epic Games, Digital Extremes,
 GOG.com or any other rights holder. All trademarks belong to their respective
-owners.
+owners. The name "Epic Pinball" is used only to identify the game this
+software works with.
+
+This software is provided "as is", without warranty of any kind (see sections
+15 and 16 of the LICENSE). You are responsible for making sure your use of it,
+and of your copy of the game, complies with the law and with the game's license
+terms where you live.
 
 The app icon and all interface artwork in this repository are original work
 created for this project.

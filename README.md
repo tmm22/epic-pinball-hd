@@ -46,6 +46,24 @@ tools/package_app.sh                 # builds build/EpicPinballHD.app (no game d
 open build/EpicPinballHD.app         # first launch: choose your CD image or game folder
 ```
 
+### Using your legal copy
+
+1. Buy [*Epic Pinball: The Complete Collection* on GOG.com](https://www.gog.com/en/game/epic_pinball_the_complete_collection)
+   (DRM-free; Windows, macOS and Linux), or use an original CD or floppy
+   release that you own.
+2. Open the app. On first launch, choose your copy. Any of these works:
+   - the original CD, or an image of your own disc (`.iso`, `.bin`, `.img`)
+   - an installed DOS copy (the folder with `EP1.EXE`, `SFX1.PIN`, ...)
+   - the installed GOG macOS game (its `.app` or folder)
+   - a GOG Windows installer unpacked with `innoextract`
+3. The app reads your copy (it never modifies it) and imports it in a few
+   seconds into `~/Library/Application Support/EpicPinballHD/`.
+
+To import from the command line instead:
+`EpicPinball --headless-import /path/to/your/copy`. Full steps are in
+[NOTICE](NOTICE). The GOG edition hasn't been tested directly. If its import
+fails, open an issue describing the file layout. Never upload game files.
+
 For development:
 
 ```sh
