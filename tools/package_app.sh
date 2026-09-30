@@ -100,6 +100,21 @@ swiftc -O -o "$OUT/.icon/make_icon" "$APPDIR/Resources/make_icon.swift"
 iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf "$OUT/.icon"
 
+# ---------------------------------------------------------------- licenses
+# GPL-3.0 for this project, plus the license texts BSD-3-Clause (libopenmpt, libogg,
+# libvorbis) and LGPL-2.1 (mpg123) require alongside the embedded binaries. See NOTICE.
+say "licenses"
+LIC="$APP/Contents/Resources/Licenses"
+mkdir -p "$LIC"
+cp "$ROOT/LICENSE" "$LIC/EpicPinballHD-LICENSE.txt"
+cp "$ROOT/NOTICE" "$LIC/NOTICE.txt"
+for spec in libopenmpt:LICENSE mpg123:COPYING libogg:COPYING libvorbis:COPYING; do
+    formula="${spec%%:*}"; file="${spec#*:}"
+    src="$(brew --prefix "$formula" 2>/dev/null)/$file"
+    [ -f "$src" ] || die "license text missing for $formula ($src); install it with Homebrew"
+    cp "$src" "$LIC/$formula-$file.txt"
+done
+
 # ---------------------------------------------------------------- dylibs
 say "embedding non-system dylibs"
 FW="$APP/Contents/Frameworks"
