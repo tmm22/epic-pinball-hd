@@ -126,6 +126,12 @@ public final class ClassicEngine {
     public var eventCooldown: UInt8 = 0   // ds:676A
     /// EP9-13: per-slot sensor lockouts (EP10 ds:3880 + 2i); `eventLockout` is the scan's scratch copy.
     public var lockoutSlots: [UInt8] = [0, 0, 0, 0, 0]
+    /// Demo mode's flipper keys (EP1 cs:028D / 028F as attract_autoflip cs:0C48 writes them); they
+    /// replace the player's input while the demo flag is set (ClassicEngine+Attract.swift).
+    public internal(set) var demoKeys: FrameInput = []
+    /// Front-end policy, off for the original: in demo mode, release the plunger at full charge on
+    /// tables whose demo code never does (EP2-EP13; only EP1 has cs:0B79), so their demo plays.
+    public var attractLaunch = false
     public var curLayer: UInt8 = 0        // ds:677E
     var obj = (x: Int16(0), y: Int16(0), vx: Int16(0), vy: Int16(0))  // ds:6A30..6A36
     var writeback: UInt8 = 0              // ds:589A
@@ -256,6 +262,7 @@ public final class ClassicEngine {
         nudgeTimer = 0; tiltMeter = 0; tilted = false; plungerCharge = 0; serveDelay = 0
         extraGravity = Int16(truncatingIfNeeded: data.gravity.extraInitial)
         eventLockout = 0; eventCooldown = 0; curLayer = 0; writeback = 0; lockoutSlots = [0, 0, 0, 0, 0]
+        demoKeys = []
         dsLocal.removeAll()
         frameCount = 0; stepCount = 0; divideFaults = 0; loopGuardTrips = 0
         lastStep = StepReport()
@@ -351,6 +358,7 @@ public final class ClassicEngine {
 
     /// One video frame: 3 physics steps with the main-loop logic after `gravityPhase` of them.
     public func runFrame() {
+        if demoMode { input = demoKeys }   // demo: the keyboard is not read (any key ends the demo)
         let steps = data.timing.stepsPerFrame
         for s in 0..<steps {
             if s == gravityPhase { frameLogic() }
@@ -358,6 +366,8 @@ public final class ClassicEngine {
             onStep?(frameCount, s, lastStep)
         }
         if gravityPhase >= steps { frameLogic() }
+        // EP9-EP13: render_frame runs after frame_sync's steps (EP10 cs:1238; RulesRuntime.renderAfterSteps)
+        if rulesMode == .full, let r = rules, r.renderAfterSteps, r.hasAutomaticHooks { r.renderFrame() }
         frameCount += 1
     }
 
@@ -503,12 +513,14 @@ public final class ClassicEngine {
                 return
             }
         }
-        // cs:0B44: Ctrl or Space held (demo mode not modelled)
-        if input.contains(.plunger) || input.contains(.space) {
+        // cs:0B44: demo mode, Ctrl or Space held
+        let demo = demoMode
+        if demo || input.contains(.plunger) || input.contains(.space) {
             let maxC = UInt16(truncatingIfNeeded: data.plunger.max)
             let canAdd = data.plunger.cmp == "jae" ? plungerCharge < maxC : plungerCharge <= maxC
-            if canAdd { plungerCharge &+= UInt16(truncatingIfNeeded: data.plunger.step) }
-            return
+            if canAdd { plungerCharge &+= UInt16(truncatingIfNeeded: data.plunger.step); return }
+            // cs:0B79: past the maximum the demo goes on to the release (EP1 only, or `attractLaunch`)
+            guard demo, attractLayout?.releaseAtMax == true || attractLaunch else { return }
         }
         // cs:0B83 released: vx = 0 every frame; fire if charged
         balls[0].vx = 0
@@ -540,9 +552,13 @@ public final class ClassicEngine {
                 return
             }
         }
-        if input.contains(.plunger) || input.contains(.space) {
-            plungerCharge = UInt16(truncatingIfNeeded: data.plunger.max)   // cs:0C0A mov word [5AEC],2BCh
-            return
+        let demo = demoMode   // cs:0BF3: demo mode counts as held (and never launches in the original)
+        if demo || input.contains(.plunger) || input.contains(.space) {
+            let maxC = UInt16(truncatingIfNeeded: data.plunger.max)
+            if !(demo && attractLaunch && plungerCharge == maxC) {
+                plungerCharge = maxC   // cs:0C0A mov word [5AEC],2BCh
+                return
+            }
         }
         guard plungerCharge != 0, let l = data.plunger.launch else { return }
         if let ops = lb?.releaseDsOps { runDSOps(ops) }
@@ -1260,5 +1276,83 @@ public final class ClassicEngine {
     /// Sprite frame for a flipper at `angle` (cs:10F5: (angle + 2) / 3).
     public static func spriteFrame(angle: Int, frameCount: Int) -> Int {
         max(0, min(frameCount - 1, (angle + 2) / 3))
+    }
+}
+
+// MARK: - Save states (Replay/SimulationSnapshot.swift)
+
+extension ClassicEngine {
+    /// Every mutable field of the engine, for practice save states and the replays' power-on restore.
+    /// Taken and restored between frames only. Tables derived from `data` (and the lazy caches) are
+    /// not part of it; the attached rules and ball physics have their own states (`EngineSnapshot`).
+    public struct State {
+        var buffer: [UInt8]
+        var wallLUT: [[WallClass]], occLUT: [[OccClass]]
+        var dynState: (Int, Int, Int)
+        var balls: [BallState], groups: [FlipperGroupState], params: [Int16]
+        var input: FrameInput
+        var collidedThisStep: Bool
+        var flipperContact: UInt8, kickStrength: UInt8, kickerCooldown: UInt8
+        var contactDir: UInt8, contactDirOpp: UInt8
+        var crDvx: Int16, crDvy: Int16
+        var hitList: [UInt8], responseLog: [ResponseRecord]
+        var nudgeTimer: UInt8, tiltMeter: UInt8, tilted: Bool
+        var plungerCharge: UInt16, serveDelay: UInt8, extraGravity: Int16
+        var eventLockout: UInt8, eventCooldown: UInt8, lockoutSlots: [UInt8]
+        var curLayer: UInt8
+        var obj: (x: Int16, y: Int16, vx: Int16, vy: Int16)
+        var writeback: UInt8
+        var gravityPhase: Int, sensorsEnabled: Bool, ballLostResets: Bool
+        var frameCount: Int, stepCount: Int, divideFaults: Int, loopGuardTrips: Int
+        var lastStep: StepReport
+        var rulesMode: RulesMode
+        var bufferWriteLog: [Int]?
+        var bufferGeneration: Int
+        var sensorDispatchCount: Int, sensorHits: [Int]
+        var dsLocal: [Int: UInt8]
+    }
+
+    public func saveState() -> State {
+        State(buffer: buffer, wallLUT: wallLUT, occLUT: occLUT, dynState: dynState, balls: balls, groups: groups, params: params,
+              input: input, collidedThisStep: collidedThisStep, flipperContact: flipperContact, kickStrength: kickStrength,
+              kickerCooldown: kickerCooldown, contactDir: contactDir, contactDirOpp: contactDirOpp, crDvx: crDvx, crDvy: crDvy,
+              hitList: hitList, responseLog: responseLog, nudgeTimer: nudgeTimer, tiltMeter: tiltMeter, tilted: tilted,
+              plungerCharge: plungerCharge, serveDelay: serveDelay, extraGravity: extraGravity, eventLockout: eventLockout,
+              eventCooldown: eventCooldown, lockoutSlots: lockoutSlots, curLayer: curLayer, obj: obj, writeback: writeback,
+              gravityPhase: gravityPhase, sensorsEnabled: sensorsEnabled, ballLostResets: ballLostResets, frameCount: frameCount,
+              stepCount: stepCount, divideFaults: divideFaults, loopGuardTrips: loopGuardTrips, lastStep: lastStep,
+              rulesMode: rulesMode, bufferWriteLog: bufferWriteLog, bufferGeneration: bufferGeneration,
+              sensorDispatchCount: sensorDispatchCount, sensorHits: sensorHits, dsLocal: dsLocal)
+    }
+
+    public func restoreState(_ s: State) {
+        buffer = s.buffer; wallLUT = s.wallLUT; occLUT = s.occLUT; dynState = s.dynState
+        balls = s.balls; groups = s.groups; params = s.params; input = s.input
+        collidedThisStep = s.collidedThisStep; flipperContact = s.flipperContact; kickStrength = s.kickStrength
+        kickerCooldown = s.kickerCooldown; contactDir = s.contactDir; contactDirOpp = s.contactDirOpp
+        crDvx = s.crDvx; crDvy = s.crDvy; hitList = s.hitList; responseLog = s.responseLog
+        nudgeTimer = s.nudgeTimer; tiltMeter = s.tiltMeter; tilted = s.tilted
+        plungerCharge = s.plungerCharge; serveDelay = s.serveDelay; extraGravity = s.extraGravity
+        eventLockout = s.eventLockout; eventCooldown = s.eventCooldown; lockoutSlots = s.lockoutSlots
+        curLayer = s.curLayer; obj = s.obj; writeback = s.writeback
+        gravityPhase = s.gravityPhase; sensorsEnabled = s.sensorsEnabled; ballLostResets = s.ballLostResets
+        frameCount = s.frameCount; stepCount = s.stepCount; divideFaults = s.divideFaults; loopGuardTrips = s.loopGuardTrips
+        lastStep = s.lastStep; rulesMode = s.rulesMode; bufferWriteLog = s.bufferWriteLog; bufferGeneration = s.bufferGeneration
+        sensorDispatchCount = s.sensorDispatchCount; sensorHits = s.sensorHits; dsLocal = s.dsLocal
+    }
+
+    /// Feeds the simulation-relevant fields into `h` (fixed order; `dsLocal` by sorted key).
+    func digest(into h: inout StateHasher) {
+        h.add(buffer)
+        for b in balls { h.add(b.active); h.add(b.x); h.add(b.y); h.add(b.vx); h.add(b.vy); h.add(b.accx); h.add(b.accy); h.add(b.layer) }
+        for g in groups { h.add(g.angle); h.add(g.drawn); h.add(g.moving) }
+        for p in params { h.add(p) }
+        h.add(collidedThisStep); h.add(flipperContact); h.add(kickStrength); h.add(kickerCooldown)
+        h.add(contactDir); h.add(contactDirOpp); h.add(crDvx); h.add(crDvy); h.add(hitList)
+        h.add(nudgeTimer); h.add(tiltMeter); h.add(tilted); h.add(plungerCharge); h.add(serveDelay); h.add(extraGravity)
+        h.add(eventLockout); h.add(eventCooldown); h.add(lockoutSlots); h.add(curLayer)
+        h.add(obj.x); h.add(obj.y); h.add(obj.vx); h.add(obj.vy); h.add(writeback)
+        h.add(frameCount); h.add(stepCount); h.add(divideFaults); h.add(loopGuardTrips)
+        for k in dsLocal.keys.sorted() { h.add(k); h.add(dsLocal[k]!) }
     }
 }

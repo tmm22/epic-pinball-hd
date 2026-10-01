@@ -23,13 +23,21 @@ final class ClassicPresentation {
     /// A message given directly (CLI / demo), overriding `state.message`.
     var directMessage: DotMessage?
     var paused = false
+    /// The visible whole-screen fade's palette (`ScreenFadePlayer.current`), drawn over everything else.
+    var screenOverrides: [PaletteOverride]?
     /// Tri-state lamp sprites from the rules runtime (0 not drawn, 1 a, 2 b), if known.
     var lampSprites: [UInt8]?
     private var plungerSeen = false
+    /// render_frame's message effects run from the EXE (nil without the EXE, or if its code does not
+    /// have the expected shape: messages are then drawn static).
+    let animator: MessageAnimator?
+    /// The direct message the animator runs (rules messages: `animator.serial`).
+    private var animatedDirect: DotMessage?
 
     init(composer: ClassicComposer, exe: TableExe?, stripShown: Bool = true) {
         self.composer = composer
         self.exe = exe
+        animator = exe.flatMap { MessageAnimator(exe: $0, graphics: composer.graphics, spec: composer.spec) }
         maxStripRows = max(0, ScreenLayout.screenRows - composer.spec.windowRows)
         self.stripShown = stripShown
         stripRows = stripShown ? maxStripRows : 0
@@ -87,6 +95,7 @@ final class ClassicPresentation {
     /// One original frame: strip slide (the camera moves with it so the bottom of the view
     /// stays put), then camera_update with the highest active ball.
     func stepFrame(engine: ClassicEngine, manualY: Int?) {
+        animateDirectMessage()
         if stripShown && stripRows < maxStripRows {
             stripRows += 1; camera.y += 1
         } else if !stripShown && stripRows > 0 {
@@ -111,13 +120,70 @@ final class ClassicPresentation {
     func ingest(_ s: PresentationState) {
         state = s
         if !s.lampSprites.isEmpty { lampSprites = s.lampSprites }
+        pendingSpriteSets += s.spriteSets
         frameMessage = resolveMessage()
+        animateRulesMessage()
     }
 
     private var frameMessage: DotMessage?
+    /// Sprite-set calls (EP8's robot) of every frame ingested since the last `apply`: VRAM blits, so
+    /// none may be dropped when several original frames run per display frame.
+    private var pendingSpriteSets: [SpriteSetEvent] = []
 
     /// The message to draw this frame (direct message, else the last ingested one).
-    func currentMessage() -> DotMessage? { directMessage ?? frameMessage ?? (state.message == nil ? nil : resolveMessage()) }
+    func currentMessage() -> DotMessage? {
+        if let d = directMessage {
+            guard let a = animator, animatedDirect == d, a.steps > 0 else { return d }   // not stepped: the static list
+            return live(d)
+        }
+        // The animator follows the rules' message: nil once render_frame has ended it (EP2-13's rules keep
+        // reporting the message, they do not run render_frame's counter).
+        if animator?.serial != nil { return frameMessage }
+        return frameMessage ?? (state.message == nil ? nil : resolveMessage())
+    }
+
+    /// `m` with the dots render_frame plotted last (nil = none on screen).
+    private func live(_ m: DotMessage) -> DotMessage? {
+        guard let shown = animator?.shown else { return nil }
+        var out = m
+        out.liveDots = shown.dots
+        out.liveColours = shown.colours
+        return out
+    }
+
+    /// The rules' message through render_frame's effects (`MessageAnimator.follow`).
+    private func animateRulesMessage() {
+        guard let a = animator, directMessage == nil else { return }   // a direct message has the animator
+        a.follow(state.message, message: frameMessage, texts: state.texts, line: dotLine)
+        if let m = frameMessage, a.serial != nil { frameMessage = live(m) }
+    }
+
+    /// A direct message (CLI, demo) runs its effect from the first frame it is shown.
+    private func animateDirectMessage() {
+        guard let a = animator, let d = directMessage else { animatedDirect = nil; return }
+        if animatedDirect != d {
+            animatedDirect = d
+            var first = d
+            first.appended = []
+            a.start(first)
+            for line in d.appended { a.append(line) }
+        }
+        a.step()
+    }
+
+    /// DAC 255 while an animated message runs (its fades, render_frame cs:3E70); nil otherwise.
+    var messageDAC: PaletteOverride? {
+        guard let a = animator, a.active, a.serial != nil || animatedDirect != nil else { return nil }
+        let c = a.dac255
+        return PaletteOverride(index: 255, r: c.r, g: c.g, b: c.b)
+    }
+
+    private func dotLine(_ t: TextRef) -> DotLine? {
+        guard let f8 = spec.textRoutines[t.routine] else { return nil }
+        var bytes = t.bytes
+        if bytes.isEmpty, let exe { bytes = exe.cString(at: t.exeOffset, max: 64) }
+        return DotLine(text: bytes, font8: f8, di: t.position, colour: t.colour >= 0 ? UInt8(t.colour) : 255)
+    }
 
     /// The message of `state`. Text: the live bytes the rules pass
     /// (`MessageRef.bytes`, digits patched in), else the string at `MessageRef.exeOffset` in the
@@ -136,12 +202,9 @@ final class ClassicPresentation {
         if let k = lastMessageKey, k.0 == key.0, k.1 == key.1, k.2 == key.2, key.3 <= k.3 || key.3 < 0 {} else { appendedLines = [] }
         lastMessageKey = key
         for t in state.texts {
-            guard let f8 = spec.textRoutines[t.routine] else { continue }
-            var bytes = t.bytes
-            if bytes.isEmpty, let exe { bytes = exe.cString(at: t.exeOffset, max: 64) }
-            appendedLines.append(DotLine(text: bytes, font8: f8, di: t.position))
+            if let line = dotLine(t) { appendedLines.append(line) }
         }
-        return DotMessage(text: text, ax: ax, di: di, appended: appendedLines)
+        return DotMessage(text: text, ax: ax, di: di, appended: appendedLines, colour: ref.colour >= 0 ? UInt8(ref.colour) : nil)
     }
 
     /// Pushes the frame's presentation into the renderer.
@@ -149,7 +212,12 @@ final class ClassicPresentation {
         if engine.plungerCharge > 0 { plungerSeen = true }
         let plungerY = plungerSeen ? spec.plungerBaseY + (Int(engine.plungerCharge) >> spec.plungerShift) : nil
         renderer.stripRows = stripRows
-        renderer.present(state, message: currentMessage(), flippers: scene.flippers, plungerY: plungerY, paused: paused,
+        var st = state
+        if let dac = messageDAC { st.paletteOverrides.append(dac) }
+        if let o = screenOverrides { st.paletteOverrides += o }   // the boot fade-in fades DAC 255 too
+        st.spriteSets = pendingSpriteSets
+        pendingSpriteSets = []
+        renderer.present(st, message: currentMessage(), flippers: scene.flippers, plungerY: plungerY, paused: paused,
                          lampSprites: lampSprites)
     }
 }
@@ -333,5 +401,31 @@ struct DemoDriver {
             i += max(1, s.count + 1)
         }
         return out
+    }
+}
+
+// MARK: - Practice save states (Replays.swift)
+
+extension ClassicPresentation {
+    /// The presentation's per-frame state (ingested rules state, dot-message lines, camera), saved
+    /// and restored with the simulation in practice mode.
+    struct Saved {
+        fileprivate var state: PresentationState
+        fileprivate var lampSprites: [UInt8]?
+        fileprivate var camera: ClassicCamera
+        fileprivate var appendedLines: [DotLine]
+        fileprivate var lastMessageKey: (Int, Int, Int, Int)?
+        fileprivate var frameMessage: DotMessage?
+        fileprivate var plungerSeen: Bool
+    }
+
+    func save() -> Saved {
+        Saved(state: state, lampSprites: lampSprites, camera: camera, appendedLines: appendedLines, lastMessageKey: lastMessageKey,
+              frameMessage: frameMessage, plungerSeen: plungerSeen)
+    }
+
+    func restore(_ s: Saved) {
+        state = s.state; lampSprites = s.lampSprites; camera = s.camera; appendedLines = s.appendedLines
+        lastMessageKey = s.lastMessageKey; frameMessage = s.frameMessage; plungerSeen = s.plungerSeen
     }
 }

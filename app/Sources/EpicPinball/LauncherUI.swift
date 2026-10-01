@@ -31,6 +31,7 @@ struct LauncherView: View {
                 detail.frame(width: 340)
             }
             .padding(20)
+            HDPackProgressBar(model: model)
         }
         .background(Theme.background)
         .foregroundStyle(Theme.text)
@@ -82,13 +83,23 @@ struct LauncherView: View {
                         if let p = t.problem { Text(p).font(.caption).foregroundStyle(.orange) }
                     }
                 }
-                HighScoreList(entries: model.highScores(t.number))
+                HighScoreList(entries: model.highScores(t.number), watchable: { model.replayURL($0) != nil },
+                              onWatch: { e in if let u = model.replayURL(e) { model.watch(u) } })
+                TableStatsView(stats: model.tableStats(t.number))
+                ReplaysRow(model: model, table: t.number)
                 GameOptionsRow(settings: model.settings)
-                Button { model.play() } label: {
-                    Text("Play").font(.title3.bold()).frame(maxWidth: .infinity).padding(.vertical, 6)
+                HStack {
+                    Button { model.play() } label: {
+                        Text("Play").font(.title3.bold()).frame(maxWidth: .infinity).padding(.vertical, 6)
+                    }
+                    .buttonStyle(.borderedProminent).tint(Theme.accent)
+                    .keyboardShortcut(.defaultAction)
+                    Button { model.practice() } label: {
+                        Text("Practice").font(.title3).padding(.vertical, 6).padding(.horizontal, 4)
+                    }
+                    .buttonStyle(.bordered)
+                    .help("Save and restore the game state with K and L; practice games are not scored")
                 }
-                .buttonStyle(.borderedProminent).tint(Theme.accent)
-                .keyboardShortcut(.defaultAction)
                 .disabled(!t.available)
             }
             Spacer(minLength: 0)
@@ -151,6 +162,9 @@ struct TableCard: View {
 struct HighScoreList: View {
     var entries: [HighScoreEntry]
     var highlight: Set<Int> = []
+    /// Launcher: entries whose replay is kept get a watch button.
+    var watchable: (HighScoreEntry) -> Bool = { _ in false }
+    var onWatch: ((HighScoreEntry) -> Void)? = nil
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text("HIGH SCORES").font(.caption.bold()).foregroundStyle(Theme.accent)
@@ -163,10 +177,87 @@ struct HighScoreList: View {
                     Text(e.initials).frame(width: 44, alignment: .leading)
                     Spacer()
                     Text(formatScore(e.score))
+                    if let w = onWatch {
+                        if watchable(e) {
+                            Button { w(e) } label: { Image(systemName: "play.circle") }
+                                .buttonStyle(.plain).foregroundStyle(Theme.accent).help("Watch the replay of this game")
+                        } else {
+                            Image(systemName: "play.circle").hidden()
+                        }
+                    }
                 }
                 .font(.system(size: 13, weight: highlight.contains(i) ? .heavy : .regular, design: .monospaced))
                 .foregroundStyle(highlight.contains(i) ? Theme.accent2 : Theme.text)
             }
+        }
+    }
+}
+
+/// The table's statistics (stats.json), one column per physics mode that has been played.
+struct TableStatsView: View {
+    var stats: [String: TableStats]
+
+    private var modes: [(String, TableStats)] {
+        GameSettings.PhysicsMode.allCases.compactMap { m in stats[m.rawValue].flatMap { $0.isEmpty ? nil : (m.rawValue.capitalized, $0) } }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("STATISTICS").font(.caption.bold()).foregroundStyle(Theme.accent)
+            if modes.isEmpty {
+                Text("No games played yet").font(.callout).foregroundStyle(Theme.dim)
+            } else {
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 2) {
+                    if modes.count > 1 || modes.first?.0 != "Classic" {
+                        GridRow {
+                            Text("")
+                            ForEach(modes, id: \.0) { Text($0.0).foregroundStyle(Theme.dim).gridColumnAlignment(.trailing) }
+                        }
+                    }
+                    row("Games") { "\($0.games)" }
+                    row("Balls") { "\($0.balls)" }
+                    row("Best") { $0.scores > 0 ? formatScore($0.bestScore) : "-" }
+                    row("Average") { $0.averageScore.map(formatScore) ?? "-" }
+                    row("Play time") { formatPlayTime($0.playSeconds) }
+                }
+                .font(.system(size: 12, design: .monospaced))
+            }
+        }
+    }
+
+    private func row(_ label: String, _ value: @escaping (TableStats) -> String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(Theme.dim)
+            ForEach(modes, id: \.0) { Text(value($0.1)).gridColumnAlignment(.trailing) }
+        }
+    }
+}
+
+/// The selected table's replays: the last finished game and the ones kept with Save Replay.
+struct ReplaysRow: View {
+    var model: AppModel
+    var table: Int
+    var body: some View {
+        let last = model.lastReplay(table)
+        let saved = model.savedReplays(table)
+        if last != nil || !saved.isEmpty {
+            HStack {
+                if let u = last {
+                    Button { model.watch(u) } label: { Label("Watch last game", systemImage: "play.rectangle") }
+                }
+                if !saved.isEmpty {
+                    Menu {
+                        ForEach(saved) { r in
+                            Button("\(r.header.date.formatted(date: .abbreviated, time: .shortened))  \(formatScore(r.header.finalScores.max() ?? 0))") {
+                                model.watch(r.url)
+                            }
+                        }
+                    } label: { Label("Saved replays", systemImage: "film.stack") }
+                    .fixedSize()
+                }
+                Spacer()
+            }
+            .buttonStyle(.bordered).controlSize(.small)
         }
     }
 }
@@ -254,11 +345,7 @@ struct ImportView: View {
                     buttons
                 }
             case let .finished(n, warnings):
-                VStack(spacing: 10) {
-                    Text("Imported \(n) tables").font(.headline).foregroundStyle(Theme.accent)
-                    ForEach(warnings.prefix(6), id: \.self) { Text($0).font(.caption).foregroundStyle(.orange) }
-                    Button("Choose a table") { model.screen = .picker }.buttonStyle(.borderedProminent).tint(Theme.accent)
-                }
+                ImportDonePanel(model: model, tables: n, warnings: warnings)
             }
             Spacer()
             Text("Developers: start with --data DIR to use an extracted/ directory instead.")

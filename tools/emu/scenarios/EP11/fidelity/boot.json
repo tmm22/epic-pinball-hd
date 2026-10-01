@@ -1,0 +1,19 @@
+{
+ "name": "boot",
+ "table": 11,
+ "start": "boot",
+ "frames": 300,
+ "inputs": [],
+ "mode": "full",
+ "on_drain": "continue",
+ "watch": {
+  "ds": [
+   [
+    "0x0e90",
+    2
+   ]
+  ],
+  "messages": true
+ },
+ "description": "The first main-loop arrival after the boot, 1 player: the boot tail (intro message, counter 32h)."
+}

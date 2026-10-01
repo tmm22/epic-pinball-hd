@@ -11,8 +11,13 @@ public struct SceneState: Sendable, Equatable {
         /// Composited palette indices (0 = transparent), row-major, or nil to draw
         /// the procedural fallback ball.
         public var pixels: [UInt8]?
-        public init(topLeft: Vec2, width: Int = 15, height: Int = 14, pixels: [UInt8]?) {
+        /// Ball slot (0...4); the renderer matches it with `MotionInterpolation`.
+        public var slot: Int
+        /// Integer top-left the engine composited `pixels` at (nil: `topLeft` rounded).
+        public var pixelTopLeft: SIMD2<Int>?
+        public init(topLeft: Vec2, width: Int = 15, height: Int = 14, pixels: [UInt8]?, slot: Int = 0, pixelTopLeft: SIMD2<Int>? = nil) {
             self.topLeft = topLeft; self.width = width; self.height = height; self.pixels = pixels
+            self.slot = slot; self.pixelTopLeft = pixelTopLeft
         }
     }
 
@@ -25,8 +30,12 @@ public struct SceneState: Sendable, Equatable {
         public var pivot: Vec2
         public var tip: Vec2
         public var radius: Double
-        public init(index: Int, frame: Int, pivot: Vec2, tip: Vec2, radius: Double) {
+        /// Continuous angle index (0 = up ... 9 = rest) for a renderer that rotates the flipper:
+        /// `EnhancedPhysics.flipperAlpha` with enhanced physics, else the group's angle. nil = unknown.
+        public var angle: Double?
+        public init(index: Int, frame: Int, pivot: Vec2, tip: Vec2, radius: Double, angle: Double? = nil) {
             self.index = index; self.frame = frame; self.pivot = pivot; self.tip = tip; self.radius = radius
+            self.angle = angle
         }
     }
 
@@ -36,29 +45,35 @@ public struct SceneState: Sendable, Equatable {
     public var viewHeight: Double
     public var ball: BallSprite?
     public var flippers: [FlipperSprite]
+    /// The other balls in play (slots 1...4, multiball), in slot order: the original draws every
+    /// active slot after slot 0 (`GameSimulation.drawnBallSlots`).
+    public var extraBalls: [BallSprite]
 
-    public init(viewTop: Double, viewHeight: Double, ball: BallSprite?, flippers: [FlipperSprite]) {
+    public init(viewTop: Double, viewHeight: Double, ball: BallSprite?, flippers: [FlipperSprite], extraBalls: [BallSprite] = []) {
         self.viewTop = viewTop; self.viewHeight = viewHeight; self.ball = ball; self.flippers = flippers
+        self.extraBalls = extraBalls
     }
 
     public init(simulation sim: GameSimulation, camera: Camera, showSprites: Bool = true) {
         let span = camera.visibleSpan
         viewTop = span.top
         viewHeight = span.height
+        extraBalls = []
         guard showSprites else { ball = nil; flippers = []; return }
         let e = sim.engine
-        if sim.ballVisible {
-            ball = BallSprite(topLeft: sim.renderBallTopLeft, width: e.data.ball.w, height: e.data.ball.h,
-                              pixels: e.compositedBallPixels(ball: 0))
-        } else {
-            ball = nil
+        func sprite(_ i: Int) -> BallSprite {
+            BallSprite(topLeft: sim.renderBallTopLeft(i), width: e.data.ball.w, height: e.data.ball.h,
+                       pixels: e.compositedBallPixels(ball: i), slot: i, pixelTopLeft: SIMD2(Int(e.balls[i].x), Int(e.balls[i].y)))
         }
+        ball = sim.ballVisible ? sprite(0) : nil
+        extraBalls = (1..<max(1, sim.drawnBallSlots)).filter { e.balls[$0].active != 0 }.map(sprite)
+        let model = sim.enhanced
         flippers = e.data.flippers.enumerated().map { i, f in
             let angle = Int(e.groups[f.group].angle)
             let frames = f.sprite?.frames.count ?? 4
             let (p, t) = sim.flipperCapsule(flipper: i, angle: angle)
             return FlipperSprite(index: i, frame: ClassicEngine.spriteFrame(angle: angle, frameCount: frames),
-                                 pivot: p, tip: t, radius: 3)
+                                 pivot: p, tip: t, radius: 3, angle: model?.flipperAlpha(group: f.group) ?? Double(angle))
         }
     }
 

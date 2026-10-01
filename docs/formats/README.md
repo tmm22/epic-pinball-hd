@@ -90,18 +90,20 @@ loop trips (HeadlessGameTests).
   message) are therefore not checked on the other tables. Rule scenarios reach 8-16 of each table's 12-20 sensor
   handlers (tables 10-13) and 289 of EP1's 303 lifted blocks.
 * **Boot state for EP2-EP13.** The port starts their data segment from the EXE image plus the command-line options;
-  the intro/boot tail that EP1's glue runs is not annotated for them. Visible effects: attract-text state, and EP8's
-  palette ring starts at a different rotation phase than after the original's intro fade.
+  the intro/boot tail that EP1's glue runs is not annotated for them. Visible effect: attract-text state. (EP8's
+  palette ring and rotation counter now start as the boot's fade-in and intro leave them, docs/enhanced/presentation.md
+  3.1.)
 * **Automatic hooks are unnamed.** EP2-EP13 main-loop and end-of-ball rule code is found by pattern (rules.md 4.1) and
   verified against the code, but not understood; EP1's end-of-ball split differs from the hand annotation at its cut
   points. EP9 h29c6 and EP8 cs:3613 have no schema op; the port executes them from the EXE.
-* **Presentation.** Message effects (flying dots, fades, per-dot colour cycling; render_frame cs:3E35-4373) are timed
-  but not animated. EP9-13 message dot colours (a DS byte set before each call, EP10 ds:00C5) are not reported by the
-  rules yet; the table's most common value is used. EP8's robot set (segment 0x3f88) is not drawn. Palette fades at
-  boot and ball end are not shown. The DOSBox-X checks cover EP1 frames, the EP10 strip, EP4 and EP8 screens.
+* **Presentation.** Message effects, EP9-13 message colours, the EP1-8 in-game palette fades, the visible boot fade-in
+  and end-of-game fade-out (all 13) and EP8's robot set are shown since docs/enhanced/presentation.md; not shown are the
+  boot's intro scroll and EP3/EP5's colour lamps. The DOSBox-X checks cover EP1 frames, the EP10 strip, EP4 and EP8
+  screens.
 * **DOSBox-X vs the harness.** The checks against the running game cover about 150 frames of EP1 demo play; after that
   the paths drift apart for a reason that has not been found.
-* **Not ported**: the PC-speaker sound path (only the Sound Blaster/MASI path is), demo/attract auto-play, the hidden
-  F1 parameter editor, the launcher (PINBALL.EXE menus).
+* **Not ported**: the PC-speaker sound path (only the Sound Blaster/MASI path is), the hidden F1 parameter editor, the
+  launcher (PINBALL.EXE menus). Demo mode (players 'D': auto-plunge, auto-flip, stuck-ball nudge, demo idle text) is
+  ported and checked on all 13 tables (docs/enhanced/attract.md).
 * EP8's `engine.json` still lists `plunger`, `serve` and `nudge.lane` as exporter fallbacks; the hand-verified override
   (`tools/engine_overrides/EP8.json`: launch block, no serve, any-ball nudge condition) replaces them and EP8 is exact.

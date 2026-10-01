@@ -6,6 +6,8 @@ collision art (the live collision buffer, including gates and rule-drawn pixels)
 rules, timers, lamps, sounds and main-loop order at 59.94 Hz, and the same sensor dispatch from the
 pixels under the ball. Classic mode is untouched: with no model installed the engine runs exactly
 as before (`run_suite.py --modes physics,rules`: 830/830 after the hook changes).
+The preset is `GameSettings.enhancedPreset` (`classicFeel`, the default, or `modern`; Settings > Game >
+"Enhanced physics feel"), applied live through `GameSimulation.enhancedConfig`.
 
 Code: `app/Sources/PinballCore/Enhanced/` (`BallPhysics.swift`, `EnhancedPhysics.swift`,
 `EnhancedConfig.swift`, `DistanceField.swift`, `FlipperModel.swift`, `EnhancedValidation.swift`).
@@ -476,6 +478,7 @@ release (about 1 s in a debug build).
   outline changes, like the original.
 * Ball-ball uses discs, not the original's ring overlap and forced divisors.
 * Spin (modern only) is a simple rolling-contact model; it is not visible in the art.
-* The presentation layer still draws from the integer fields (1/128 px precision);
-  `EnhancedPhysics.ballCentre(_:)`, `flipperAlpha(group:)` and `flipperPose(_:)` expose the smooth
-  state for a renderer that wants it.
+* The presentation draws the balls from `EnhancedPhysics.ballCentre(_:)` at full precision
+  (`GameSimulation.ballPosition`, see rendering.md "High refresh"), and the flippers' angle index
+  from `flipperAlpha(group:)`. Both are sampled at frame boundaries, where `flipperAlpha` is a whole
+  index; the continuous motion on screen comes from interpolating between frames.

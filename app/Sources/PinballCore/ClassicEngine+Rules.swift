@@ -90,8 +90,9 @@ extension ClassicEngine: RulesHost {
     /// hook or glue for fall back to the physics engine's own version.
     func rulesFrameLogic(_ r: RulesRuntime) {
         let full = rulesMode == .full
+        let demo = full ? attractLayout.flatMap { demoMode ? $0 : nil } : nil   // cs:0C48 runs in the whole loop only
         if full, r.hasAutomaticHooks {
-            for item in r.schedule(engine: self) { runScheduled(item, r) }
+            for item in demo.map({ r.demoSchedule(engine: self, layout: $0) }) ?? r.schedule(engine: self) { runScheduled(item, r) }
             return
         }
         if full {
@@ -112,7 +113,7 @@ extension ClassicEngine: RulesHost {
         if full { r.runRange("dmdTimer") }                                    // cs:0A17
         if !r.hook("drain") { drainCheck() }                                  // cs:0A31..0A9A
         plungerLane()                                                         // cs:0A9D..0C48
-        nudgeTilt()                                                           // cs:0DFD..0E8A
+        if let a = demo { attractBlock(a) } else { nudgeTilt() }              // cs:0C48 demo / cs:0DFD..0E8A
         if full {
             r.hook("flipper_lane_change")                                     // cs:102E..1080
             r.lampUpdate()                                                    // cs:10C2 lamp_update
@@ -137,6 +138,7 @@ extension ClassicEngine: RulesHost {
         case .drain: drainCheck()
         case .lane: plungerLane()
         case .nudge: nudgeTilt()
+        case .attract: if let a = attractLayout { attractBlock(a) }
         case .lamps: r.lampUpdate()
         case .gravity: gravityAndScan()
         case .render: r.renderFrame()

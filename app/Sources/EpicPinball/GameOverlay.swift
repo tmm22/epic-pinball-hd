@@ -11,6 +11,9 @@ final class OverlayModel {
 
     enum Item: String, CaseIterable {
         case resume = "Resume", newGame = "New Game", settings = "Settings…", chooseTable = "Choose Table", quit = "Quit"
+        // Replays and practice (Replays.swift)
+        case practice = "Practice Mode", saveState = "Save State", loadState = "Restore State", endPractice = "End Practice"
+        case saveReplay = "Save Replay", watchReplay = "Watch Replay", watchAgain = "Watch Again"
     }
 
     var mode: Mode = .none
@@ -24,14 +27,47 @@ final class OverlayModel {
     var finalScores: [UInt32] = []
     var entries: [HighScoreEntry] = []
     var highlight: Set<Int> = []
+    // Replays and practice
+    var session: SessionKind = .normal
+    /// The game just finished has a replay (game over: Save Replay / Watch Replay).
+    var replayAvailable = false
+    var replaySaved = false
+    /// Practice: the current slot has a state (this session or on disk).
+    var stateSaved = false
+    /// Practice: the slot Save State / Restore State use (1-4).
+    var stateSlot = 1
+    /// A line under the scores (replay check, "practice games are not scored").
+    var note: String?
 
     @ObservationIgnored var onItem: ((Item) -> Void)?
 
     var items: [Item] {
-        switch mode {
-        case .pauseMenu: return Item.allCases
-        case .gameOver: return [.newGame, .chooseTable, .settings, .quit]
+        switch (mode, session) {
+        case (.pauseMenu, .normal): return [.resume, .newGame, .practice, .settings, .chooseTable, .quit]
+        case (.pauseMenu, .practice):
+            return [.resume, .saveState] + (stateSaved ? [.loadState] : []) + [.newGame, .endPractice, .settings, .chooseTable, .quit]
+        case (.pauseMenu, .watching): return [.resume, .watchAgain, .settings, .chooseTable, .quit]
+        case (.gameOver, .normal):
+            return [.newGame] + (replayAvailable ? [.saveReplay, .watchReplay] : []) + [.chooseTable, .settings, .quit]
+        case (.gameOver, .practice): return (stateSaved ? [.loadState] : []) + [.newGame, .endPractice, .chooseTable, .settings, .quit]
+        case (.gameOver, .watching): return [.watchAgain, .chooseTable, .quit]
         default: return []
+        }
+    }
+
+    func label(_ it: Item) -> String {
+        switch it {
+        case .saveReplay where replaySaved: return "Replay Saved"
+        case .saveState, .loadState: return "\(it.rawValue) (Slot \(stateSlot))"
+        default: return it.rawValue
+        }
+    }
+
+    var gameOverTitle: String {
+        switch session {
+        case .normal: return "Game Over"
+        case .practice: return "Practice Over"
+        case .watching: return "Replay Finished"
         }
     }
 
@@ -52,19 +88,23 @@ final class OverlayModel {
 
 struct GameOverlayView: View {
     @Bindable var model: OverlayModel
+    /// Cabinet: turned with the picture (OverlayRotation.swift).
+    var orientation = OverlayOrientation()
 
     var body: some View {
         ZStack {
             if model.active { Color.black.opacity(0.55).ignoresSafeArea() }
             switch model.mode {
             case .none: EmptyView()
-            case .pauseMenu: menuPanel(title: "Paused", subtitle: model.tableName)
+            case .pauseMenu: menuPanel(title: model.session == .practice ? "Practice" : (model.session == .watching ? "Replay Paused" : "Paused"),
+                                       subtitle: model.tableName)
             case .gameOver: gameOverPanel
             case .initials: initialsPanel
             }
         }
         .foregroundStyle(Theme.text)
         .allowsHitTesting(model.active)
+        .cabinetRotated(orientation.rotation)
     }
 
     private func panel<C: View>(@ViewBuilder _ c: () -> C) -> some View {
@@ -89,7 +129,7 @@ struct GameOverlayView: View {
         VStack(spacing: 6) {
             ForEach(Array(model.items.enumerated()), id: \.offset) { i, it in
                 Button { model.index = i; model.activate() } label: {
-                    Text(it.rawValue).font(.system(size: 17, weight: .semibold, design: .rounded))
+                    Text(model.label(it)).font(.system(size: 17, weight: .semibold, design: .rounded))
                         .frame(width: 220).padding(.vertical, 7)
                         .background(RoundedRectangle(cornerRadius: 8).fill(i == model.index ? Theme.accent : Color.white.opacity(0.08)))
                         .foregroundStyle(i == model.index ? Color.black : Theme.text)
@@ -101,7 +141,7 @@ struct GameOverlayView: View {
 
     private var gameOverPanel: some View {
         panel {
-            Text("Game Over").font(.system(size: 30, weight: .heavy, design: .rounded))
+            Text(model.gameOverTitle).font(.system(size: 30, weight: .heavy, design: .rounded))
             Text(model.tableName).foregroundStyle(Theme.dim)
             if !model.finalScores.isEmpty {
                 HStack(spacing: 18) {
@@ -113,6 +153,7 @@ struct GameOverlayView: View {
                     }
                 }
             }
+            if let n = model.note { Text(n).font(.caption).foregroundStyle(Theme.dim).multilineTextAlignment(.center).frame(width: 300) }
             HighScoreList(entries: model.entries, highlight: model.highlight).frame(width: 260)
             menuItems
         }

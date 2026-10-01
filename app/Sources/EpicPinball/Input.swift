@@ -19,6 +19,12 @@ enum GameAction: String, CaseIterable, Codable, Sendable {
     case toggleMusic, toggleSfx
     case volumeDown, volumeUp, musicDown, musicUp
     case fullTable, cycleFilter, pixelAspect, physicsMode
+    /// Saves the current output frame as a PNG (Settings > Display > Screenshots).
+    case screenshot
+    /// FPS / frame time / input latency overlay.
+    case perfOverlay
+    /// Practice mode: save / restore the whole simulation state.
+    case saveState, loadState
 
     var label: String {
         switch self {
@@ -44,6 +50,10 @@ enum GameAction: String, CaseIterable, Codable, Sendable {
         case .cycleFilter: return "Cycle upscale filter"
         case .pixelAspect: return "Pixel aspect"
         case .physicsMode: return "Classic / enhanced"
+        case .screenshot: return "Save screenshot"
+        case .perfOverlay: return "Performance overlay"
+        case .saveState: return "Practice: save state"
+        case .loadState: return "Practice: restore state"
         }
     }
 
@@ -62,12 +72,14 @@ enum GameAction: String, CaseIterable, Codable, Sendable {
 /// macOS virtual key codes (kVK_*, ANSI positions) used by the defaults and the key-name table.
 enum KeyCode {
     static let a: UInt16 = 0, s: UInt16 = 1, f: UInt16 = 3, z: UInt16 = 6, x: UInt16 = 7, e: UInt16 = 14, r: UInt16 = 15
+    static let k: UInt16 = 40, l: UInt16 = 37
     static let equal: UInt16 = 24, minus: UInt16 = 27, rightBracket: UInt16 = 30, leftBracket: UInt16 = 33, p: UInt16 = 35
     static let returnKey: UInt16 = 36, comma: UInt16 = 43, slash: UInt16 = 44, m: UInt16 = 46, period: UInt16 = 47
     static let tab: UInt16 = 48, space: UInt16 = 49, delete: UInt16 = 51, escape: UInt16 = 53
     static let rightCommand: UInt16 = 54, leftCommand: UInt16 = 55, leftShift: UInt16 = 56, capsLock: UInt16 = 57
     static let leftOption: UInt16 = 58, leftControl: UInt16 = 59, rightShift: UInt16 = 60, rightOption: UInt16 = 61
     static let rightControl: UInt16 = 62, keypadEnter: UInt16 = 76
+    static let f10: UInt16 = 109, f12: UInt16 = 111
     static let left: UInt16 = 123, right: UInt16 = 124, down: UInt16 = 125, up: UInt16 = 126
 
     /// Modifier keys arrive as flagsChanged; their state is read from the device-dependent
@@ -141,6 +153,12 @@ struct KeyBindings: Codable, Equatable, Sendable {
         GameAction.cycleFilter.rawValue: [KeyCode.f],
         GameAction.pixelAspect.rawValue: [KeyCode.a],
         GameAction.physicsMode.rawValue: [KeyCode.e],
+        // Function keys: the original reads none in play (F1 only inside its quit prompt), so
+        // these never shadow a table key. Also in the menus: Shift-Cmd-S, View > Performance Overlay.
+        GameAction.screenshot.rawValue: [KeyCode.f12],
+        GameAction.perfOverlay.rawValue: [KeyCode.f10],
+        GameAction.saveState.rawValue: [KeyCode.k],
+        GameAction.loadState.rawValue: [KeyCode.l],
     ])
 
     init(map: [String: [UInt16]]) { self.map = map }
@@ -149,6 +167,10 @@ struct KeyBindings: Codable, Equatable, Sendable {
         let stored = try decoder.singleValueContainer().decode([String: [UInt16]].self)
         var m = Self.defaults.map
         for a in GameAction.allCases { if let k = stored[a.rawValue] { m[a.rawValue] = k } }
+        // An action the file does not know yet (added by a later build) gets its default keys
+        // only where the user has not bound them to something else.
+        let used = Set(GameAction.allCases.filter { stored[$0.rawValue] != nil }.flatMap { m[$0.rawValue] ?? [] })
+        for a in GameAction.allCases where stored[a.rawValue] == nil { m[a.rawValue]?.removeAll { used.contains($0) } }
         // The menu must stay reachable from the keyboard.
         if m[GameAction.menu.rawValue]?.isEmpty ?? true { m[GameAction.menu.rawValue] = [KeyCode.escape] }
         map = m
@@ -237,6 +259,8 @@ final class GamepadInput {
     var enabled = true
     var hapticsEnabled = true
     private(set) var connected: [String] = []
+    /// Called when a controller goes away while controllers are enabled (the game pauses).
+    var onDisconnect: (() -> Void)?
     private var lastButtons: Set<String> = []
     private var lastInput: FrameInput = []
     private var hapticEngines: [ObjectIdentifier: CHHapticEngine] = [:]
@@ -248,7 +272,10 @@ final class GamepadInput {
             MainActor.assumeIsolated { self?.refresh() }
         })
         observers.append(nc.addObserver(forName: .GCControllerDidDisconnect, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
+            MainActor.assumeIsolated {
+                self?.refresh()
+                if self?.enabled == true { self?.onDisconnect?() }
+            }
         })
         // No startWirelessControllerDiscovery: controllers paired in System Settings connect on their
         // own, and discovery would need Bluetooth permission.

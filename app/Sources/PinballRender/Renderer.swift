@@ -91,6 +91,34 @@ struct SceneUniforms {
     }
 }
 
+/// Mirror of `ExtraBalls` in Pinball.metal (scene_fragment buffer 1): balls in slots 1...4, drawn
+/// after ball 0 in slot order like the original's per-ball loop. Raw bytes: info (float4), ball[4]
+/// (float4: top-left, size), kind[4] (float4: x = 1 indexed sprite, 2 procedural), pixels[4][14]
+/// (uint4, 15x14 indices each, as `SceneUniforms.ballPixels`).
+struct ExtraBallUniforms {
+    static let maxBalls = 4
+    static let size = 16 + 16 * maxBalls * 2 + SceneUniforms.ballBytes * maxBalls
+    private(set) var bytes = [UInt8](repeating: 0, count: size)
+    private(set) var count = 0
+
+    mutating func append(_ b: SceneState.BallSprite) {
+        guard count < Self.maxBalls else { return }
+        let i = count
+        count += 1
+        let indexed = b.pixels.map { $0.count == b.width * b.height && $0.count <= SceneUniforms.ballBytes } ?? false
+        bytes.withUnsafeMutableBytes { raw in
+            raw.storeBytes(of: Float(count), toByteOffset: 0, as: Float.self)
+            let rect = [Float(b.topLeft.x), Float(b.topLeft.y), Float(b.width), Float(b.height)]
+            for (k, v) in rect.enumerated() { raw.storeBytes(of: v, toByteOffset: 16 + 16 * i + 4 * k, as: Float.self) }
+            raw.storeBytes(of: Float(indexed ? 1 : 2), toByteOffset: 16 + 16 * Self.maxBalls + 16 * i, as: Float.self)
+            if indexed, let px = b.pixels {
+                let base = 16 + 32 * Self.maxBalls + SceneUniforms.ballBytes * i
+                for (k, v) in px.enumerated() { raw[base + k] = v }
+            }
+        }
+    }
+}
+
 struct PresentUniforms {
     var dst: SIMD4<Float>
     var src: SIMD4<Float>
@@ -136,9 +164,21 @@ public final class PinballRenderer {
     public var hdPackWarnings: [String] { enhanced?.hdWarnings ?? [] }
     /// True while an HD pack is drawn.
     public var hdPackActive: Bool { settings.useHDPack && enhanced?.hd != nil }
+    /// Flippers drawn rotated (high refresh; HD pack, or without one at output resolution with the
+    /// smooth / xBRZ / CRT filter; built on first use, 0 before).
+    public var rotatedFlipperCount: Int {
+        if let hd = enhanced?.hd, settings.useHDPack { return hd.rotation?.entries.count ?? 0 }
+        return enhanced?.lastOutputRotations ?? 0
+    }
+    var flipperRotationBuildTime: Double? { enhanced?.hd?.rotation?.buildTime ?? enhanced?.nativeRotation?.sprites.buildTime }
+    /// Blocks until the rotated-flipper resources (started by a high-refresh frame) are built.
+    func waitForFlipperRotation() {
+        enhanced?.hd?.rotationJob?.wait()
+        enhanced?.nativeRotationJob?.wait()
+    }
     let tableNumber: Int
     let assetsDirectory: URL
-    private var enhanced: EnhancedPipeline?
+    var enhanced: EnhancedPipeline?
     private var lastLampStates: [UInt8] = []
     private var presentCalls = 0
     private var lastInterpFrame: Int?
@@ -161,10 +201,16 @@ public final class PinballRenderer {
     let stripTexture: MTLTexture
     /// Flipper sprite frames (nil entries fall back to procedural capsules).
     public let flipperSprites: FlipperSpriteSet?
-    private let assets: TableAssets
+    let assets: TableAssets
     /// Native frame: 320 x (400 + 1). One spare row allows sub-row smooth scrolling.
     let frameTexture: MTLTexture
     static let frameFormat: MTLPixelFormat = .rgba8Unorm
+    /// Display rotation: the upright frame (output size, axes swapped for 90/270) and the
+    /// present_rotate pipelines by pixel format (DisplayRotation.swift).
+    var rotationScratch: MTLTexture?
+    /// The score window's upright strip when it is rotated (`encodeStrip(rotation:)`).
+    var stripRotationScratch: MTLTexture?
+    var rotatePipelines: [UInt: MTLRenderPipelineState] = [:]
 
     public init(device: MTLDevice, assets: TableAssets, flipperSprites: FlipperSpriteSet? = nil) throws {
         self.device = device
@@ -268,7 +314,7 @@ public final class PinballRenderer {
         }
     }
 
-    private func presentPipeline(for format: MTLPixelFormat) throws -> MTLRenderPipelineState {
+    func presentPipeline(for format: MTLPixelFormat) throws -> MTLRenderPipelineState {
         let key = "\(filter.rawValue)/\(format.rawValue)"
         if let p = presentPipelines[key] { return p }
         let p = try Self.makePipeline(device: device, library: library, fragment: filter.fragmentFunctionName, format: format)
@@ -341,7 +387,10 @@ public final class PinballRenderer {
         guard let c = composer else { return }
         lastLampStates = state.lampStates
         presentCalls += 1
+        c.spriteSetsWanted = state.spriteSetsShown
+        for e in state.spriteSets { c.applySpriteSet(e) }   // rule code draws them before lamp_update runs
         if let ls = lampSprites { c.applyLampSprites(ls) } else { c.applyLamps(state.lamps) }
+        c.syncSpriteSets()   // a state load can change them without a call
         for f in flippers { c.setFlipper(f.index, frame: f.frame) }
         c.setPlunger(y: plungerY)
         if let rows = c.takeDirtyRows() { uploadIndexRows(rows, from: c.vram) }
@@ -380,12 +429,23 @@ public final class PinballRenderer {
 
     /// Encodes the frame, finishing with `target` cleared to black outside the viewport.
     /// Classic settings run the original two passes; anything else the enhanced pipeline.
+    /// `settings.rotation` turns the finished picture (DisplayTransform); `fit(for:)` and the
+    /// passes then work in the upright (logical) target.
     public func encode(scene: SceneState, into commandBuffer: MTLCommandBuffer, target: MTLTexture) throws {
         let box = timingBox
         commandBuffer.addCompletedHandler { cb in
             let ms = (cb.gpuEndTime - cb.gpuStartTime) * 1000
             if ms > 0 { box.set(RenderTiming(gpuMilliseconds: ms)) }
         }
+        if settings.rotation != .none {
+            try encodeRotated(scene: scene, into: commandBuffer, target: target)
+        } else {
+            try encodeFrame(scene: scene, into: commandBuffer, target: target)
+        }
+    }
+
+    /// The upright frame into `target` (classic or enhanced passes).
+    func encodeFrame(scene: SceneState, into commandBuffer: MTLCommandBuffer, target: MTLTexture) throws {
         if settings.isClassic {
             try encodeClassic(scene: scene, into: commandBuffer, target: target)
             return
@@ -434,6 +494,8 @@ public final class PinballRenderer {
                 su.ballInfo = SIMD4(2, 0, 0, 0)
             }
         }
+        var extra = ExtraBallUniforms()
+        for b in scene.extraBalls { extra.append(b) }
         let composerFlippers = composer?.drawsFlippers ?? false
         if let c = composer, c.hasOverlay, scene.viewHeight < Double(TableGeometry.height) {
             su.overlayInfo = SIMD4(1, Float(ClassicComposer.overlayRows), 0, 0)
@@ -460,6 +522,7 @@ public final class PinballRenderer {
         enc1.setViewport(MTLViewport(originX: 0, originY: 0, width: Double(TableGeometry.width), height: Double(rendered), znear: 0, zfar: 1))
         enc1.setRenderPipelineState(scenePipeline)
         enc1.setFragmentBytes(&su, length: MemoryLayout<SceneUniforms>.stride, index: 0)
+        extra.bytes.withUnsafeBytes { enc1.setFragmentBytes($0.baseAddress!, length: ExtraBallUniforms.size, index: 1) }
         enc1.setFragmentTexture(indexTexture, index: 0)
         enc1.setFragmentTexture(paletteTexture, index: 1)
         enc1.setFragmentTexture(atlasTexture, index: 2)

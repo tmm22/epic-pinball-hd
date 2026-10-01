@@ -23,6 +23,9 @@ public struct RulesOptions: Sendable, Equatable {
     /// A sound card is present (sfx_play's MASI path; without it the original uses the PC speaker,
     /// which is not ported, so no sound events are produced).
     public var soundPresent = true
+    /// Demo mode: PINBALL.EXE's players 'D' (EP1 cs:007A: demo_mode = 1, one player). The table then
+    /// plays itself (Attract.swift); off by default.
+    public var demo = false
     public init() {}
     /// What the emulator harness passes (emulation.md section 1): 1 player, 3 balls, no sfx/music,
     /// invalid sound pointers (no sound card).
@@ -49,7 +52,11 @@ public struct RulesOptions: Sendable, Equatable {
 ///   of the string, `mode` = AL (the effect byte render_frame animates, [0B3A]), `modeWord` = AX
 ///   (AH = font/centring), `position` = DI, `bytes` = the live string (rules patch digits into it),
 ///   `framesRemaining` from render_frame's per-effect counter [0B3D] ([M], see TableGlue).
-///   `texts` = score-strip text drawn this frame (draw_text routines), same referencing.
+///   `serial` counts dmd_message calls, `renderFrames` = render_frame calls since the last one (the
+///   clock `DotEffects` replays the effects with); EP9-13 `colour` = the dot colour byte at the call
+///   (EP10 ds:00C5, read by dmd_message cs:15F0).
+///   `texts` = score-strip text drawn this frame (draw_text routines), same referencing; EP9-13 `colour`
+///   = the routine's colour byte (EP10 cs:4C65), `messageSerial`/`afterRenders` place the line in the list.
 /// * `soundEvents` = one event per sfx_play call [cs:014A] made this frame: sample = AL, rateHz =
 ///   the live sfx_rate_hz [engine_vars.sound.rate] at that call, sweepFrames = 0 (the original's
 ///   sweeps are re-trigger trains, audio.md section 4), pan = AH >> 4 if non-zero, else
@@ -85,17 +92,67 @@ public final class RulesRuntime {
     private var pendingTexts: [TextRef] = []
     /// The last dmd_message call (string DS offset, AX, DI). Whether it is still shown is decided by
     /// the message counter (DS [0B3D] when the glue knows it, else `localCounter`).
-    private struct LastMessage { var ds: Int; var ax: Int; var pos: Int }
+    private struct LastMessage { var ds: Int; var ax: Int; var pos: Int; var colour: Int = -1 }
     private var message: LastMessage?
+    /// dmd_message calls so far and render_frame calls since the last one (`MessageRef.serial` /
+    /// `renderFrames`; presentation only, nothing reads them back).
+    private var messageSerial = 0
+    private var messageRenders = 0
+    /// EP9-13: the DS colour byte dmd_message copies into its per-dot colour array (EP10 ds:00C5,
+    /// cs:15F0) and the text routines' colour bytes (EP10 cs:4C65 `mov al,[00C5h]`), by routine.
+    private let messageColourVar: Int?
+    private let textColourVars: [Int: Int]
+    /// The palette the original's fades leave in the DAC (`PaletteFade`: boot fade-in end state,
+    /// ball-loss dim, release restore), followed through the between-balls flag; presentation only.
+    public let paletteFade: PaletteFade?
+    /// The base palette as the running game has it (EP7 darkens it at boot) and as the EXE stores it
+    /// (the renderer's base palette, palette.json).
+    private let fadeBase: [UInt8]
+    private let fadeEXEBase: [UInt8]
+    private var fadeWorking: [UInt8]?
+    /// The mirrored working palette (6-bit, 768) as of the last `takePresentation` (tests).
+    public var fadedPalette: [UInt8]? { fadeWorking }
+    /// The between-balls flag F as of the last `takePresentation`: set by ball_lost_fade after its dim
+    /// (EP1 glue `fadeTail`; EP2-EP7 the end-of-ball hook after the palette loop, EP2 cs:35F0) and
+    /// cleared by the release code next to the W = B >> 2 copy (EP1 `release3`; EP2-EP7 lane glue
+    /// `release2`, EP2 cs:0CFA), both run from the rules.
+    private var fadeFlag: UInt8 = 0
+    /// The visible whole-screen fades (boot fade-in, end-of-game fade-out; `ScreenFade`), for the front
+    /// end, and the state the boot leaves (EP8: W's ring and the rotation counter, written at `boot`).
+    public let screenFade: ScreenFade?
+    private let screenFadeBootEnd: ScreenFade.Machine?
+    /// Sprite-set routines (EP8 cs:A42F) and the calls made since the last `takePresentation`.
+    public let spriteSetRoutines: [SpriteSetRoutine]
+    private var pendingSpriteSets: [SpriteSetEvent] = []
+    /// The last call of each sprite-set routine since boot (`PresentationState.spriteSetsShown`).
+    private var spriteSetsShown: [Int: Int] = [:]
     private var localCounter = 0
     private var localEffect = 0
+    /// EP2-EP13: render_frame's effect blocks run from the EXE on a private data segment with an empty
+    /// dot list (`DotEffects`), only for the message counter they keep in the rules' data segment
+    /// (EP2 ds:0A22, EP8 ds:0A83, EP10 ds:..., `DotEffects.Layout.counter`: 1 after dmd_message, +1 per
+    /// render_frame, 0 once the effect has ended) and the sounds they play. Rule code reads the
+    /// counter (EP8 cs:296E shows its transport message only while no message runs). EP1 keeps its
+    /// glue model (`TableGlue.messageEffects`, checked frame by frame in RulesLiveTests).
+    let counterEffects: DotEffects?
+    /// EP9-EP13: the flag dmd_message clears and the idle display sets (EP10 ds:0619, cs:1614 / cs:34D4)
+    /// and the idle routine render_frame calls when a message ends while the flag is <= 2 (EP10 cs:3ED7:
+    /// `cmp word [S],2; ja; ...; cmp word [C],-1; jne; mov word [C],0; call 341Bh`), found by that shape.
+    let renderTail: (at: Int, shown: Int, idle: Int)?
+    /// EP9-EP13 call render_frame after frame_sync's physics steps (EP10 cs:1238), not at the end of the
+    /// main-loop body (EP1 cs:1236): `ClassicEngine.runFrame` then calls `renderFrame` after the steps.
+    public let renderAfterSteps: Bool
+    private var msgCounterAddr: Int? { glue.ds["msg_counter"] ?? counterEffects?.layout.counter }
     private var msgCounter: Int {
-        get { glue.ds["msg_counter"].map { Int(machine.read($0, 2)) } ?? localCounter }
-        set { if let a = glue.ds["msg_counter"] { machine.write(a, 2, Int64(newValue)) } else { localCounter = newValue & 0xFFFF } }
+        get { msgCounterAddr.map { Int(machine.read($0, 2)) } ?? localCounter }
+        set { if let a = msgCounterAddr { machine.write(a, 2, Int64(newValue)) } else { localCounter = newValue & 0xFFFF } }
     }
     private var msgEffect: Int {
-        get { glue.ds["msg_effect"].map { Int(machine.read8($0)) } ?? localEffect }
-        set { if let a = glue.ds["msg_effect"] { machine.write8(a, UInt8(newValue & 0xFF)) } else { localEffect = newValue & 0xFF } }
+        get { (glue.ds["msg_effect"] ?? counterEffects?.layout.effect).map { Int(machine.read8($0)) } ?? localEffect }
+        set {
+            if let a = glue.ds["msg_effect"] ?? counterEffects?.layout.effect { machine.write8(a, UInt8(newValue & 0xFF)) }
+            else { localEffect = newValue & 0xFF }
+        }
     }
     /// Per lamp slot: 0 never drawn, 1 sprite a, 2 sprite b.
     public private(set) var lampDrawn: [UInt8]
@@ -111,6 +168,11 @@ public final class RulesRuntime {
     public var dispatcherExitIP: Int?
     /// The table's main-loop palette rotation (EP8 cs:1281), if it has one.
     public let paletteCycle: PaletteCycle?
+    /// The table's demo-mode code (attract_autoflip EP1 cs:0C48 and its state), if found.
+    public let attract: AttractLayout?
+    /// The boot's intro loop calls flipper_update every frame (EP9-EP13, EP9 cs:04DE), so the flippers
+    /// are at rest at the first main-loop arrival; EP1-EP8 arrive with them at the boot angle.
+    public let introSettlesFlippers: Bool
     /// DAC entries the palette rotation wrote last (6-bit; `paletteCycle.firstIndex`...), nil = the
     /// base palette is shown.
     private var dacRing: [UInt8]?
@@ -123,6 +185,16 @@ public final class RulesRuntime {
     /// every near call and far call into the code segment that is not a display, sound or engine
     /// routine, as the lifted graphs' gosubs and `call` ops do).
     private var directDepth = 0
+    /// EP9-EP13's score_refresh (EP12 cs:3FFE): `cmp byte [demo],1; je R; cmp word [shown],0; je R;
+    /// call idle_text; R: ret`. Unlike EP1-8's (a strip redraw, display only), it shows the idle
+    /// display again with the new score while that is the message shown (the flag is set at the end of
+    /// idle_text, EP12 cs:34F6, and cleared by dmd_message, cs:156E): it runs from the EXE.
+    public private(set) var idleScoreRefresh: Int?
+    /// EP5, EP6: dmd_message starts `cmp byte [demo],1; jne +0Ah; lea bx,[T]; mov ax,imm; mov di,imm`
+    /// (EP6 cs:15AF): in demo mode every message is replaced by the demo's idle text.
+    public private(set) var demoMessage: (flag: Int, bx: Int, ax: Int, di: Int)?
+    /// `mov word [a],imm` stores just before dmd_message's `popa; pop es; ret` (EP6 cs:1658, EP7, EP9-13).
+    public private(set) var messageExitStores: [(Int, Int)] = []
     /// Dot-message text routines (`textRoutines(code:)`): text calls wherever they come from.
     public private(set) var textRoutines = Set<Int>()
     /// Direct backend: the hook stops as a 64 K bitmap for MiniX86.
@@ -217,10 +289,63 @@ public final class RulesRuntime {
         self.options = options
         backend = program.direct ? .direct : .lifted
         machine = try RulesMachine(program: program, exe: exe)
-        glue = TableGlue.make(program: program, machine: machine)
+        let image = try? ExeImage(exe: exe)
+        let layout = image.flatMap { try? EngineLayout.discover(image: $0, search: ByteSearch($0.code)) }
+        glue = TableGlue.make(program: program, machine: machine, layout: layout)
+        counterEffects = glue.ds["msg_counter"] == nil ? DotEffects(exe: exe, table: program.table) : nil
+        let codeBytes = machine.code
+        renderTail = counterEffects.flatMap { Self.findRenderTail(code: codeBytes, layout: $0.layout) }
+        if let rf = counterEffects?.layout.renderFrame, let fs = layout?.frameSync {
+            renderAfterSteps = (fs..<min(0xFFFD, fs + 0x80)).contains { x in
+                codeBytes[x] == 0xE8 && Self.isRenderEntry((x + 3 + (Int(codeBytes[x + 1]) | Int(codeBytes[x + 2]) << 8)) & 0xFFFF, rf, codeBytes)
+            }
+        } else { renderAfterSteps = false }
         x86 = MiniX86(machine: machine)
         paletteCycle = PaletteCycle.find(code: machine.code)
+        messageColourVar = DotEffects.find(code: machine.code)?.colourVar
+        textColourVars = messageColourVar == nil ? [:] : DotEffects.textColourVars(code: machine.code)
+        spriteSetRoutines = SpriteSetRoutine.find(code: machine.code)
+        let fade = PaletteFade.find(code: machine.code)
+        let ds = machine.initialDS
+        if let f = fade, f.base >= 0, f.base + 768 <= ds.count {
+            paletteFade = f
+            fadeEXEBase = Array(ds[f.base..<(f.base + 768)])
+            fadeBase = f.runtimeBase(fadeEXEBase)
+        } else {
+            paletteFade = nil
+            fadeBase = []
+            fadeEXEBase = []
+        }
+        screenFade = ScreenFade.find(code: machine.code, ds: ds)
+        // EP8 only (the rotation runs in every wait_frame of the boot); the other tables leave nothing in DS here
+        // that the rules runtime mirrors.
+        if let sf = screenFade, sf.cycle != nil, sf.base + 768 <= ds.count { screenFadeBootEnd = sf.boot(ds: ds).end } else { screenFadeBootEnd = nil }
+        attract = AttractLayout.discover(code: machine.code)
+        if let img = image, let l = layout, let fu = l.flipperUpdate {
+            let c = img.code
+            introSettlesFlippers = (0..<max(0, l.mainLoop - 3)).contains { c[$0] == 0xE8 && EngineLayout.rel16(c, $0) == fu }
+        } else { introSettlesFlippers = false }
         textRoutines = Self.textRoutines(code: machine.code)
+        let code = machine.code
+        if let t = program.stubs.first(where: { $0.value.kind == "message" })?.key, t + 17 < 0x10000,
+           code[t] == 0x80, code[t + 1] == 0x3E, code[t + 4] == 1, code[t + 5] == 0x75, code[t + 6] == 0x0A,
+           code[t + 7] == 0x8D, code[t + 8] == 0x1E, code[t + 11] == 0xB8, code[t + 14] == 0xBF {
+            func w(_ i: Int) -> Int { Int(code[i]) | Int(code[i + 1]) << 8 }
+            demoMessage = (w(t + 2), w(t + 9), w(t + 12), w(t + 15))
+        }
+        if let dm = counterEffects?.layout.dmdMessage ?? DotEffects.find(code: code)?.dmdMessage,
+           let e = (dm..<min(0xFFF0, dm + 0x140)).first(where: { code[$0] == 0x61 && code[$0 + 1] == 0x07 && code[$0 + 2] == 0xC3 }) {
+            var i = e
+            while i >= 6, code[i - 6] == 0xC7, code[i - 5] == 0x06 {
+                i -= 6
+                messageExitStores.insert((Int(code[i + 2]) | Int(code[i + 3]) << 8, Int(code[i + 4]) | Int(code[i + 5]) << 8), at: 0)
+            }
+        }
+        idleScoreRefresh = program.stubs.first { t, st in
+            st.kind == "score_refresh" && !st.far && t + 17 < 0x10000 && code[t] == 0x80 && code[t + 1] == 0x3E && code[t + 4] == 1
+                && code[t + 5] == 0x74 && code[t + 6] == 0x0A && code[t + 7] == 0x83 && code[t + 8] == 0x3E && code[t + 11] == 0
+                && code[t + 12] == 0x74 && code[t + 13] == 0x03 && code[t + 14] == 0xE8 && code[t + 17] == 0xC3
+        }?.key
         lampDrawn = [UInt8](repeating: 0, count: max(program.lampCount, program.lampSlotCount))
         warnings += glue.warnings
         if program.direct {
@@ -446,25 +571,44 @@ public final class RulesRuntime {
     /// the boot tail (glue `init`). Called by `Scenario.apply` / game start after the engine reset.
     public func boot() {
         machine.reset()
-        paletteCycle?.bootRing(machine)   // the boot fade-in leaves the ring at base >> 2
+        counterEffects?.reset()
         dacRing = nil
+        if let pc = paletteCycle, let sf = screenFade, let end = screenFadeBootEnd, sf.cycle?.ring == pc.ring,
+           pc.ring - sf.working >= 0, pc.ring - sf.working + pc.ringBytes <= 768, 3 * pc.firstIndex + pc.ringBytes <= 768 {
+            // EP8: the boot's fade-in and intro scroll rotate the ring inside W in every wait_frame (cs:0240 ->
+            // cs:1281), so the main loop starts with W's ring, the counter and the DAC ring as `ScreenFade.boot`
+            // leaves them (ScreenFadeTests: equal to the original's after boot).
+            let r0 = pc.ring - sf.working, d0 = 3 * pc.firstIndex
+            for k in 0..<pc.ringBytes { machine.write8(pc.ring + k, end.working[r0 + k]) }
+            machine.write8(pc.counter, end.counter)
+            dacRing = Array(end.dac[d0..<(d0 + pc.ringBytes)])
+        } else {
+            paletteCycle?.bootRing(machine)
+        }
+        fadeWorking = paletteFade?.bootPalette(base: fadeBase)
+        fadeFlag = 0
         gameOver = false
         message = nil
         localCounter = 0
         localEffect = 0
         pendingSounds.removeAll()
         pendingTexts.removeAll()
+        pendingSpriteSets.removeAll()
+        spriteSetsShown = [:]   // nothing at boot draws them (EP8: cs:A42F is called only from cs:2F0F / 2F29)
         lampDrawn = [UInt8](repeating: 0, count: lampDrawn.count)
         sfxPendingDelay = 0
         let d = glue.ds
         // entry cs:0019..0055: players '1'..'4', option bits, balls digit; cs:00CA..: sound pointers.
-        if let a = d["player_count"] { machine.write8(a, UInt8(max(1, min(4, options.players)))) }
+        if let a = d["player_count"] { machine.write8(a, UInt8(options.demo ? 1 : max(1, min(4, options.players)))) }
+        if options.demo, let a = d["demo_mode"] ?? attract?.flag { machine.write8(a, 1) }   // cs:0081
         if let a = d["balls_per_game"] { machine.write8(a, UInt8(max(0, min(9, options.ballsPerGame)))) }
         if let a = d["opt_sfx"] { machine.write8(a, options.sfx ? 1 : 0) }
         if let a = d["opt_music"] { machine.write8(a, options.music ? 1 : 0) }
         if let a = d["snd_present"] { machine.write8(a, options.soundPresent ? 1 : 0) }
-        if let idle = glue.routines["idle_text"], glue.range("idleText") != nil { runRoutine(idle, "idle_text") }
+        // cs:03CB: the demo skips the boot's idle text (the init glue takes its own demo branches)
+        if !options.demo, let idle = glue.routines["idle_text"], glue.range("idleText") != nil { runRoutine(idle, "idle_text") }
         _ = runRange("init")
+        _ = runRange("bootTail")   // EP2-EP13 (TableGlue.discoverBootTail)
         pendingSounds.removeAll()
     }
 
@@ -478,8 +622,31 @@ public final class RulesRuntime {
     public enum MainLoopItem: Equatable, Sendable {
         case hook(String), glue(String)
         case decay, gates, sound, counters, drain, lane, nudge, lamps, gravity, render, paletteCycle
+        /// Demo mode's attract_autoflip block (EP1 cs:0C48), in `demoSchedule` only.
+        case attract
     }
     private var cachedSchedule: [MainLoopItem]?
+    private var cachedTimeline: [(ip: Int, item: MainLoopItem)]?
+    private var cachedDemoSchedule: [MainLoopItem]?
+
+    /// The full-mode main loop in demo mode: `schedule` with the attract block after the plunger lane
+    /// and without what the demo jumps over (cs:0D1D..0E8A: the nudge/tilt piece and any hook there).
+    public func demoSchedule(engine e: ClassicEngine, layout a: AttractLayout) -> [MainLoopItem] {
+        if let s = cachedDemoSchedule { return s }
+        _ = schedule(engine: e)
+        var out: [MainLoopItem] = []
+        for (ip, item) in cachedTimeline ?? [] {
+            switch item {
+            case .nudge: continue
+            case .hook, .glue: if ip >= a.keys && ip < a.resume { continue }
+            default: break
+            }
+            out.append(item)
+            if item == .lane { out.append(.attract) }
+        }
+        cachedDemoSchedule = out
+        return out
+    }
 
     /// The full-mode main loop for tables with automatic hooks, in the original's code order: every
     /// `when: every_frame` hook at its entry ip, interleaved with the engine's own pieces at the ips
@@ -494,7 +661,7 @@ public final class RulesRuntime {
         var items: [(Int, Int, MainLoopItem)] = []   // (ip, tie order, item)
         let every = program.hooks.values.filter { $0.when == "every_frame" }
         let kinds = Set(every.compactMap(\.kind))
-        let glueRanges = ["preFrame", "postTimers", "ruleTimers", "preGravity"].compactMap { n in glue.range(n).map { (n, $0) } }
+        let glueRanges = ["betweenBalls", "preFrame", "postTimers", "ruleTimers", "preGravity"].compactMap { n in glue.range(n).map { (n, $0) } }
         for h in every {
             if glueRanges.contains(where: { h.entryIP >= $0.1.start && h.entryIP < $0.1.end }) { continue }
             items.append((h.entryIP, 1, .hook(h.name)))
@@ -514,11 +681,13 @@ public final class RulesRuntime {
         let gravIP = ip("active_array") ?? ip("gravity") ?? 0xFFFE
         items.append((gravIP, -1, .lamps))
         items.append((gravIP, 0, .gravity))
-        items.append((0x10000, 0, .render))
+        if !renderAfterSteps { items.append((0x10000, 0, .render)) }
         // The main loop's call (EP8 cs:0843; its intro loop's call cs:0435 lies before the first hook).
         let loopStart = every.map(\.entryIP).min() ?? 0
         for s in paletteCycle?.callSites ?? [] where s >= loopStart { items.append((s, 0, .paletteCycle)) }
-        let s = items.sorted { ($0.0, $0.1) < ($1.0, $1.1) }.map(\.2)
+        let sorted = items.sorted { ($0.0, $0.1) < ($1.0, $1.1) }
+        cachedTimeline = sorted.map { (ip: $0.0, item: $0.2) }
+        let s = sorted.map(\.2)
         cachedSchedule = s
         return s
     }
@@ -527,7 +696,14 @@ public final class RulesRuntime {
     /// `continues` after each cut (rules.md 4.1), then the end-of-turn counters (player switch, ball
     /// number, game over) if the hooks did not run that code (TableGlue.discoverEndOfTurn).
     func automaticBallEnd() {
-        let ends = program.hooks.values.filter { $0.when == "ball_end" }.sorted { $0.entryIP < $1.entryIP }
+        // lifted (or, direct backend, EXE) hooks and the regions that do not lift (`nativeHooks`, run
+        // from the EXE by both backends: EP5 cs:1F4A, where the chain starts)
+        func endHook(_ n: String) -> (RulesProgram.Hook, native: Bool)? {
+            if let h = program.hooks[n] { return (h, false) }
+            return program.nativeHooks[n].map { ($0, true) }
+        }
+        let ends = (program.hooks.values.filter { $0.when == "ball_end" } + program.nativeHooks.values.filter { $0.when == "ball_end" })
+            .sorted { $0.entryIP < $1.entryIP }
         var countedByHooks = false
         // Lifted blocks that start within the end-of-turn test (its first 24 bytes): if a ball_end
         // hook ran one, the hooks did the counting (EP10 ball_end_30a6 starts there).
@@ -538,9 +714,14 @@ public final class RulesRuntime {
         if let first = ends.first {
             var name: String? = first.name
             var n = 0
-            while let cur = name, n < 16 {
+            while let cur = name, let (hk, native) = endHook(cur), n < 16 {
                 var stopIP: Int?
-                if program.direct {
+                if native {
+                    let watch = glue.routines["end_of_turn"].map { $0..<($0 + 24) }
+                    let res = runDirect(hk.entryIP, "hook \(cur)", watch: watch, stops: nativeStops(hk))
+                    if res.watchHit { countedByHooks = true }
+                    stopIP = res.stop
+                } else if program.direct {
                     // the counting code ran if any of its instructions executed (the lifted check:
                     // a block starting there ran)
                     let watch = glue.routines["end_of_turn"].map { $0..<($0 + 24) }
@@ -554,20 +735,23 @@ public final class RulesRuntime {
                     stopIP = machine.lastStopIP
                 }
                 n += 1
-                name = stopIP.flatMap { program.hooks[cur]?.continues[$0] }
+                name = stopIP.flatMap { hk.continues[$0] }
                 // The cut is the call the lift could not express (EP6 cs:31D8 call 3BD4, the gate
-                // redraw; cs:31CB the idle text): run it from the EXE, then continue after it.
-                if name != nil, let stop = stopIP, machine.code[stop] == 0xE8 {
-                    let t = (stop + 3 + (Int(machine.code[stop + 1]) | Int(machine.code[stop + 2]) << 8)) & 0xFFFF
-                    var regs: [String: UInt16] = [:]
-                    _ = nativeCall(target: t, from: stop, registers: &regs)
+                // redraw; cs:31CB the idle text): run it from the EXE, then continue after it, through
+                // the cuts of the straight-line code in between (`via`: EP9 cs:2F36 frame wait, cs:2F39
+                // the second dmd_idle_text call).
+                if name != nil, let stop = stopIP {
+                    for c in [stop] + (hk.via[stop] ?? []) where !runBallEndCut(c) { name = nil; break }
                 }
             }
             machine.watched = []
         }
         let d = glue.ds
         guard let pA = d["current_player"], let pcA = d["player_count"], let bA = d["ball_number"], let bpgA = d["balls_per_game"] else { return }
-        if !countedByHooks {
+        // The counting code is part of the hooks on every table now (the chain follows `via`): if they
+        // did not run it, the original skipped it too (EP2 cs:365C no-score rule, EP5 cs:1F51 demo mode).
+        let covered = glue.routines["end_of_turn"].map { program.ballEndHooksCover($0..<($0 + 24)) } ?? false
+        if !countedByHooks && !covered {
             // EP1 cs:343E..3465 / 352F: next player, or next ball round (game over past the last one)
             let p = machine.read8(pA)
             if machine.read8(pcA) > p {
@@ -579,6 +763,147 @@ public final class RulesRuntime {
             }
         }
         if machine.read8(bA) == machine.read8(bpgA) &+ 1 { gameOver = true }   // the original calls pause_menu
+    }
+
+    private var nativeStopCache: [Int: [Bool]] = [:]
+    /// The stop bitmap of a native hook: its own cuts (both backends).
+    private func nativeStops(_ h: RulesProgram.Hook) -> [Bool] {
+        if let b = nativeStopCache[h.entryIP] { return b }
+        var b = [Bool](repeating: false, count: 0x10000)
+        for s in h.stops { b[s & 0xFFFF] = true }
+        nativeStopCache[h.entryIP] = b
+        return b
+    }
+
+    /// A call target that is render_frame (`DotEffects.Layout.renderFrame`, or EP9-13's `push es` in front of it, EP10 cs:38E1).
+    static func isRenderEntry(_ t: Int, _ rf: Int, _ c: [UInt8]) -> Bool { t == rf || (t == rf - 1 && c[t & 0xFFFF] == 0x06) }
+
+    static func findRenderTail(code c: [UInt8], layout l: DotEffects.Layout) -> (at: Int, shown: Int, idle: Int)? {
+        func w(_ i: Int) -> Int { Int(c[i & 0xFFFF]) | Int(c[(i + 1) & 0xFFFF]) << 8 }
+        // dmd_message ends `mov word [S],0; popa; pop es; ret`
+        guard let k = (l.dmdMessage..<min(0xFFF0, l.dmdMessage + 0xC0)).first(where: { i in
+            c[i] == 0xC7 && c[i + 1] == 0x06 && w(i + 4) == 0 && c[i + 6] == 0x61 && c[i + 7] == 0x07 && c[i + 8] == 0xC3
+        }) else { return nil }
+        let sh = w(k + 2), cn = l.counter
+        let a = l.effectsEnd
+        guard a + 26 < 0x10000, c[a] == 0x83, c[a + 1] == 0x3E, w(a + 2) == sh, c[a + 4] == 2, c[a + 5] == 0x77,
+              c[a + 7] == 0x53, c[a + 8] == 0xB3, c[a + 10] == 0xE8, c[a + 13] == 0x5B,
+              c[a + 14] == 0x83, c[a + 15] == 0x3E, w(a + 16) == cn, c[a + 18] == 0xFF, c[a + 19] == 0x75,
+              c[a + 21] == 0xC7, c[a + 22] == 0x06, w(a + 23) == cn, w(a + 25) == 0, c[a + 27] == 0xE8 else { return nil }
+        return (a + 27, sh, (a + 30 + w(a + 28)) & 0xFFFF)
+    }
+
+    /// One cut of the automatic end-of-ball chain, as the original executes it at that point: a near
+    /// call is run from the EXE, except a frame wait (`mov dx,3DAh; in al,dx` near its entry, EP2
+    /// cs:0244; EP8's wait steps the palette ring) and the game-over menu (`mov di,3039h` before the
+    /// call, a routine that starts `cmp di,3039h`: EP2 cs:3817 -> cs:1550), where the chain ends (the
+    /// port's game over follows the counters). Far calls and port I/O are display only. Returns false
+    /// when the chain ends.
+    func runBallEndCut(_ c: Int) -> Bool {
+        let code = machine.code
+        func w(_ i: Int) -> Int { Int(code[i & 0xFFFF]) | Int(code[(i + 1) & 0xFFFF]) << 8 }
+        if code[c & 0xFFFF] == 0x9A, w(c + 3) == Int(x86.csValue), frameWait(w(c + 1)) {   // far wrapper (EP3 cs:0279)
+            doFrameWait(w(c + 1))
+            return true
+        }
+        guard code[c & 0xFFFF] == 0xE8 else { return true }
+        let t = (c + 3 + w(c + 1)) & 0xFFFF
+        if frameWait(t) { doFrameWait(t); return true }
+        if paletteCycle.map({ t == $0.routine }) != true, code[t] == 0x81, code[(t + 1) & 0xFFFF] == 0xFF,
+           ((c - 16)..<c).contains(where: { code[$0 & 0xFFFF] == 0xBF && w($0 + 1) == w(t + 2) }) { return false }
+        // routines that call far into code the callout does not know (EP2 cs:3CBA -> cs:A357, called with
+        // BX = 3 / 7 between the frame waits: music and screen effects) are display and sound only: skipped
+        guard cutRunnable(t) else { return true }
+        var regs: [String: UInt16] = [:]
+        _ = nativeCall(target: t, from: c, registers: &regs)
+        return true
+    }
+
+    private var cutRunnableCache: [Int: Bool] = [:]
+    /// Whether a routine run from the EXE as nativeCall runs it would only make calls the callout handles:
+    /// follows its jumps and near calls (depth 3) and classifies every far call into the code segment.
+    func cutRunnable(_ t0: Int) -> Bool {
+        if let v = cutRunnableCache[t0] { return v }
+        let code = machine.code, cs = Int(x86.csValue)
+        nativeDepth += 1
+        defer { nativeDepth -= 1 }
+        var seen = Set<Int>(), work = [(t0, 0)], ok = true
+        scan: while let (start, depth) = work.popLast() {
+            var ip = start
+            while seen.insert(ip).inserted, let i = X86Decoder.decode(code, ip) {
+                if i.mn == "lcall", let f = i.farTarget {
+                    if f.seg == cs, classifyCall(f.off, cs, direct: false).0 == .unknown { ok = false; break scan }
+                } else if i.mn == "call", let t = i.target {
+                    let (res, _) = classifyCall(t, nil, direct: false)
+                    if res == .unknown { ok = false; break scan }
+                    if res == .follow, depth < 3 { work.append((t, depth + 1)) }
+                } else if Reach.jcc.contains(i.mn) || i.mn == "loop" || i.mn == "jcxz", let t = i.target {
+                    work.append((t, depth))
+                } else if i.mn == "jmp" {
+                    guard let t = i.target else { break }
+                    ip = t
+                    continue
+                } else if ["ret", "retf", "iret"].contains(i.mn) {
+                    break
+                }
+                ip = i.next
+                if seen.count > 4000 { break scan }
+            }
+        }
+        cutRunnableCache[t0] = ok
+        return ok
+    }
+
+    private var frameWaitCache: [Int: Bool] = [:]
+    /// A frame wait (wait_frame: `push ds; pusha; [call palette_cycle;] call render_frame; ...; mov dx,3DAh;
+    /// in al,dx`, EP2 cs:0244, EP8 cs:0240) or a far wrapper around one (`push ds; pusha; mov ax,DS; mov
+    /// ds,ax; call wait_frame; popa; pop ds; retf`, EP3 cs:0279, which the lift treats as a display call).
+    func frameWait(_ t: Int) -> Bool {
+        if let v = frameWaitCache[t] { return v }
+        let code = machine.code
+        func w(_ i: Int) -> Int { Int(code[i & 0xFFFF]) | Int(code[(i + 1) & 0xFFFF]) << 8 }
+        var v = paletteCycle.map({ t == $0.waitRoutine }) == true
+        if !v, code[t & 0xFFFF] == 0x1E, code[(t + 1) & 0xFFFF] == 0x60 {
+            // `mov dx,3DAh; in al,dx` before the routine's first ret
+            var ip = t
+            for _ in 0..<16 {
+                if code[ip & 0xFFFF] == 0xBA, w(ip + 1) == 0x3DA, code[(ip + 3) & 0xFFFF] == 0xEC { v = true; break }
+                if [0xC3, 0xCB, 0xCF].contains(code[ip & 0xFFFF]) { break }
+                guard let n = x86.length(at: ip & 0xFFFF) else { break }
+                ip += n
+            }
+        }
+        if !v, code[t & 0xFFFF] == 0x1E, code[(t + 1) & 0xFFFF] == 0x60,
+           let k = (t..<(t + 12)).first(where: { code[$0 & 0xFFFF] == 0xE8 }), code[(k + 3) & 0xFFFF] == 0x61,
+           code[(k + 4) & 0xFFFF] == 0x1F, code[(k + 5) & 0xFFFF] == 0xCB {
+            let inner = (k + 3 + w(k + 1)) & 0xFFFF
+            v = inner != t && frameWait(inner)
+        }
+        frameWaitCache[t] = v
+        return v
+    }
+
+    /// One frame wait as the original runs it: EP8's palette-ring step, and the render_frame call
+    /// the wait makes (the message effect advances one frame; EP1's glue model keeps EP1's counter).
+    func doFrameWait(_ t: Int) {
+        let code = machine.code
+        func w(_ i: Int) -> Int { Int(code[i & 0xFFFF]) | Int(code[(i + 1) & 0xFFFF]) << 8 }
+        var target = t
+        if code[t & 0xFFFF] == 0x1E, code[(t + 1) & 0xFFFF] == 0x60, code[(t + 2) & 0xFFFF] != 0xE8,
+           let k = (t..<(t + 12)).first(where: { code[$0 & 0xFFFF] == 0xE8 }), code[(k + 5) & 0xFFFF] == 0xCB {
+            target = (k + 3 + w(k + 1)) & 0xFFFF   // the far wrapper's wait
+        }
+        if let pc = paletteCycle, target == pc.waitRoutine { paletteCycleStep() }
+        guard let rf = counterEffects?.layout.renderFrame else { return }
+        // the render_frame call before the wait's ret (EP2 cs:0246 first; EP7 cs:025E after the retrace wait)
+        var ip = target
+        for _ in 0..<24 {
+            let op = code[ip & 0xFFFF]
+            if op == 0xE8, Self.isRenderEntry((ip + 3 + w(ip + 1)) & 0xFFFF, rf, code) { renderFrame(); return }
+            if [0xC3, 0xCB, 0xCF].contains(op) { return }
+            guard let n = x86.length(at: ip & 0xFFFF) else { return }
+            ip += n
+        }
     }
 
     /// Runs a lifted hook if the table has it.
@@ -594,13 +919,13 @@ public final class RulesRuntime {
     /// `setup` sets (as the lifted graphs start). Returns the stop address reached, if any, and
     /// whether an instruction in `watch` ran.
     @discardableResult
-    func runDirect(_ entry: Int, _ what: String, watch: Range<Int>? = nil, setup: (MiniX86) -> Void = { _ in })
+    func runDirect(_ entry: Int, _ what: String, watch: Range<Int>? = nil, stops: [Bool]? = nil, setup: (MiniX86) -> Void = { _ in })
         -> (result: MiniX86.Stop, stop: Int?, watchHit: Bool) {
         let saved = x86.r, savedES = x86.es
         let savedStops = x86.stops, savedEpi = x86.stopAtEpilogue, savedWatch = x86.watch, savedStopIP = x86.stopIP
         x86.resetRegisters()
         x86.r[4] = saved[4] == 0 ? MiniX86.initialSP : saved[4] &- 0x100
-        x86.stops = stopBitmap
+        x86.stops = stops ?? stopBitmap
         x86.stopAtEpilogue = true
         x86.watch = watch
         x86.stopIP = nil
@@ -629,7 +954,10 @@ public final class RulesRuntime {
         x86.resetRegisters()
         x86.r[4] = saved[4] == 0 ? MiniX86.initialSP : saved[4] &- 0x100
         if let di { x86.di = UInt16(truncatingIfNeeded: di) }
+        let follow = glue.followNearCalls.contains(name)
+        if follow { nativeDepth += 1 }
         let s = x86.run(from: r.start, to: r.end)
+        if follow { nativeDepth -= 1 }
         switch s {
         case .completed, .returned, .jumpedOut, .halted: break
         default: warn("glue \(name): \(s)")
@@ -752,7 +1080,33 @@ public final class RulesRuntime {
     /// render_frame's message counter (EP1 cs:3E35..3E4D and the per-effect blocks, cs:43C5): advance,
     /// play the effect's sounds, end the message.
     public func renderFrame() {
+        messageRenders &+= 1
         var c = msgCounter
+        if let fx = counterEffects {
+            // EP9-13 render_frame's end (EP10 cs:3F77): the idle-display flag counts render_frame calls
+            defer {
+                if let t = renderTail { let v = machine.read(t.shown, 2); if v != 0 { machine.write(t.shown, 2, Int64((v + 1) & 0xFFFF)) } }
+            }
+            guard c != 0 else { return }
+            // other code stored into the counter or the effect byte: render_frame goes on from there
+            if fx.counter != c { fx.setCounter(c) }
+            if !fx.active { return }
+            fx.step()
+            for ax in fx.sounds { sfxPlay(ax: ax) }
+            machine.write(fx.layout.step, 2, Int64(fx.stepWord))
+            guard fx.rawCounter == 0xFFFF else { msgCounter = fx.counter; return }
+            if let t = renderTail {
+                // EP10 cs:3ED7..3EF2: while the flag is <= 2, an ended message gives way to the idle display
+                // (counter 0, then cs:341B, whose dmd_message sets it to 1); past 2 the counter stays 0FFFFh.
+                guard machine.read(t.shown, 2) <= 2 else { msgCounter = 0xFFFF; return }
+                msgCounter = 0
+                var regs: [String: UInt16] = [:]
+                _ = nativeCall(target: t.idle, from: t.at, registers: &regs)
+            } else {
+                msgCounter = 0   // EP1-8: the plot loop turns 0FFFFh into 0 (EP1 cs:43C5), the message is gone
+            }
+            return
+        }
         guard c != 0 else { return }
         if let fx = glue.messageEffects[msgEffect], fx.endCount > 0 {
             c = (c + 1) & 0xFFFF
@@ -770,15 +1124,29 @@ public final class RulesRuntime {
         case let .message(ds, mode, pos):
             startMessage(ds: ds, ax: mode, pos: pos)
         case let .text(ds, pos, routine):
+            // EP3 cs:0279 (wait_frame's far wrapper) is listed as a text routine by the lift
+            if counterEffects != nil, frameWait(routine) { doFrameWait(routine); break }
             pendingTexts.append(textRef(ds: ds, pos: pos, routine: routine))
         case let .display(what):
+            // lifted rules: a frame wait the lift treats as display (EP3 cs:0279 far wrapper)
+            if counterEffects != nil, what.hasPrefix("routine_"), let t = Int(what.dropFirst(8), radix: 16), frameWait(t) { doFrameWait(t) }
+            // lifted rules: `display routine_a42f`; AL is the `mov al,imm` before that call in the block
+            if what.hasPrefix("routine_"), let t = Int(what.dropFirst(8), radix: 16),
+               let ss = spriteSetRoutines.first(where: { $0.entry == t }), let ip = machine.currentBlockIP,
+               let al = ss.selector(code: machine.code, from: ip) {
+                pendingSpriteSets.append(SpriteSetEvent(routine: t, selector: al))
+                spriteSetsShown[t] = al
+            }
             if what == "idle_text", let idle = glue.routines["idle_text"], glue.range("idleText") != nil {
                 runRoutine(idle, "idle_text")
             } else if what == "idle_text" {
                 // Tables without the glue: the one rule-visible effect (EP1 cs:3B16..3B1D).
                 if let t = program.engineVars["tilted"], machine.read(t.addr, t.size) == 1, let m = program.vars["mode"] { machine.write(m, 0) }
             }
-        case .number, .scoreRefresh, .outsideWrite:
+        case .scoreRefresh:
+            // EP9-13: score_refresh re-shows the idle display (dmd_message) when it is the one shown
+            if let t = idleScoreRefresh { var regs: [String: UInt16] = [:]; _ = nativeCall(target: t, from: t, registers: &regs) }
+        case .number, .outsideWrite:
             break
         }
     }
@@ -786,17 +1154,37 @@ public final class RulesRuntime {
     /// A dmd_message call made by engine-side code (EP8's launch, cs:0C30).
     public func showMessage(ds: Int, ax: Int, di: Int) { startMessage(ds: ds, ax: ax, pos: di) }
 
-    private func startMessage(ds: Int, ax: Int, pos: Int) {
+    private func startMessage(ds ds0: Int, ax ax0: Int, pos pos0: Int) {
         // dmd_message cs:15DE: [0B3B] = 0, [0B3A] = AL, text rendered, [0B3D] = 1.
-        if traceCalls { messageCalls.append([ds, ax & 0xFFFF, pos & 0xFFFF]) }
-        message = LastMessage(ds: ds, ax: ax, pos: pos)
-        if let a = glue.ds["msg_scroll"] { machine.write(a, 2, 0) }
+        if traceCalls { messageCalls.append([ds0, ax0 & 0xFFFF, pos0 & 0xFFFF]) }
+        var ds = ds0, ax = ax0, pos = pos0
+        // EP5/EP6: in demo mode every message is the demo's idle text (EP6 cs:15AF)
+        if let o = demoMessage, machine.read8(o.flag) == 1 { ds = o.bx; ax = o.ax; pos = o.di }
+        // the stores at dmd_message's common exit run on every path (EP6 cs:1658 [577Ah] = -40, a rule
+        // timer; EP10 cs:1614 [0619h] = 0, the idle-display flag)
+        defer { for (a, v) in messageExitStores { machine.write(a, 2, Int64(v)) } }
+        // AH 0..2: a string longer than 30 characters, or too wide to centre, leaves everything as it
+        // was (EP6 cs:15D1..1600: `jmp` to the exit)
+        let ah = (ax >> 8) & 0xFF
+        if ah <= 2 {
+            let len = machine.string(at: ds, limit: 0x20).count
+            if len > 0x1E || 0x140 - (ah == 2 ? 8 : (ah == 0 ? 11 : 16)) * len < 0 { return }
+        }
+        message = LastMessage(ds: ds, ax: ax, pos: pos, colour: messageColourVar.map { Int(machine.read8($0)) } ?? -1)
+        messageSerial &+= 1
+        messageRenders = 0
+        if let a = glue.ds["msg_scroll"] ?? counterEffects?.layout.step { machine.write(a, 2, 0) }
         msgEffect = ax & 0xFF
         msgCounter = 1
+        counterEffects?.start(dots: [], effect: ax & 0xFF, colour: UInt8(truncatingIfNeeded: message?.colour ?? 0xFF))
     }
 
     private func textRef(ds: Int, pos: Int, routine: Int) -> TextRef {
-        TextRef(exeOffset: program.dsFileOffset + ds, dsOffset: ds, position: pos, routine: routine, bytes: machine.string(at: ds))
+        var t = TextRef(exeOffset: program.dsFileOffset + ds, dsOffset: ds, position: pos, routine: routine, bytes: machine.string(at: ds))
+        if let v = textColourVars[routine] { t.colour = Int(machine.read8(v)) }
+        t.messageSerial = messageSerial
+        t.afterRenders = messageRenders
+        return t
     }
 
     private func csRead(_ a: Int) -> UInt8 {
@@ -820,7 +1208,9 @@ public final class RulesRuntime {
 
     /// What a call from x86 code does (the callout's decision, shared with `directCodeReport`).
     enum CallEffect: Equatable {
-        case none, sfx, lampUpdate, gameOver, ballLostFade, gates([Int]), liftedHook(Int), message, text, number, paletteStep
+        case none, sfx, lampUpdate, gameOver, ballLostFade, gates([Int]), liftedHook(Int), message, text, number, paletteStep, spriteSet
+        /// A frame wait (EP2-13: `doFrameWait`, render_frame steps the message counter).
+        case frameWait
     }
 
     /// The callout's decision for a call to `target` (`farSeg` nil = near): run the callee, apply
@@ -830,6 +1220,9 @@ public final class RulesRuntime {
         if let seg = farSeg, let api = glue.soundAPISegment, seg == api { return (.handled, .none) }   // MASI driver
         let r = glue.routines
         if target == r["sfx_play"] { return (.handled, .sfx) }
+        if counterEffects != nil, farSeg == nil || farSeg == csSeg, frameWait(target) { return (.handled, .frameWait) }
+        // a display routine for the rules (stub / isDisplayRoutine): only reported to the presentation
+        if spriteSetRoutines.contains(where: { $0.entry == target }) { return (.handled, .spriteSet) }
         if target == r["idle_text"] || target == r["gate_top"] || glue.follow.contains(target) || program.gateRoutines.contains(target) {
             return (farSeg == nil ? .follow : .unknown, .none)
         }
@@ -841,6 +1234,7 @@ public final class RulesRuntime {
             if program.direct { return (farSeg == nil || farSeg == csSeg ? .follow : .unknown, .none) }
             return (.handled, .liftedHook(h))
         }
+        if target == idleScoreRefresh { return (farSeg == nil ? .follow : .unknown, .none) }
         if let stub = program.stubs[target] {
             // direct rule code runs num_to_text from the EXE (it writes the digits into DS)
             if stub.kind == "number", direct { return (.follow, .none) }
@@ -860,6 +1254,8 @@ public final class RulesRuntime {
         if isDisplayRoutine(target) { return (.handled, .none) }
         // Inside a rule-code `call` (EP10 cs:341B -> cs:358A num_to_text): execute the callee.
         if nativeDepth > 0, farSeg == nil { return (.follow, .none) }
+        // Glue calling rule code (EP2 lane cs:0CAF -> cs:3BAF dmd_idle_text, a gosub of the hooks).
+        if farSeg == nil, program.isRuleSubroutine(target) { return (.follow, .none) }
         // Direct rule code: gosubs and the lifted backend's `call` ops (far calls into the code segment too).
         if direct, farSeg == nil || farSeg == csSeg { return (.follow, .none) }
         return (.unknown, .none)
@@ -879,6 +1275,10 @@ public final class RulesRuntime {
         case .text: pendingTexts.append(textRef(ds: Int(x.bx), pos: Int(x.di), routine: target))
         case .number: machine.writeNumber(UInt32(x.dx) << 16 | UInt32(x.ax), buffer: Int(x.bx))
         case .paletteStep: paletteCycleStep()
+        case .frameWait: doFrameWait(target)
+        case .spriteSet:
+            pendingSpriteSets.append(SpriteSetEvent(routine: target, selector: Int(x.ax & 0xFF)))
+            spriteSetsShown[target] = Int(x.ax & 0xFF)
         }
         return res
     }
@@ -1069,6 +1469,51 @@ public final class RulesRuntime {
         return UInt32(truncatingIfNeeded: machine.read(s.addr, 4))
     }
 
+    /// The palette on screen as the fades' machine (`ScreenFade.Machine`): W (the mirrored fades, else the base
+    /// palette >> 2; EP8's ring from the data segment), the DAC (W with EP8's DAC ring) and EP8's rotation
+    /// counter and speed. Entry 255 is the message colour, which the end-of-game fade-out leaves alone.
+    public func screenMachine() -> ScreenFade.Machine? {
+        guard let sf = screenFade else { return nil }
+        let ds = machine.initialDS
+        guard sf.base >= 0, sf.base + 768 <= ds.count else { return nil }
+        var w = fadeWorking ?? sf.runtimeBase(Array(ds[sf.base..<(sf.base + 768)])).map { $0 >> 2 }
+        var dac = w
+        var counter: UInt8 = 0, speed: UInt8 = 0
+        if let pc = paletteCycle, pc.ring - sf.working >= 0, pc.ring - sf.working + pc.ringBytes <= 768 {
+            let r0 = pc.ring - sf.working
+            for k in 0..<pc.ringBytes { w[r0 + k] = machine.read8(pc.ring + k) }
+            dac = w
+            let d0 = 3 * pc.firstIndex
+            if let d = dacRing, d0 + d.count <= 768 { dac.replaceSubrange(d0..<(d0 + d.count), with: d) }
+            counter = machine.read8(pc.counter)
+            speed = machine.read8(pc.speed)
+        }
+        return ScreenFade.Machine(working: w, dac: dac, counter: counter, speed: speed)
+    }
+
+    /// DAC entries 0..254 where the faded working palette differs from the base palette (6-bit -> 8-bit
+    /// like the ring below). The flag going to 1 is ball_lost_fade's dim, back to 0 the release restore.
+    private func fadeOverrides() -> [PaletteOverride] {
+        guard let pf = paletteFade, var w = fadeWorking else { return [] }
+        if let f = pf.flag {
+            let v = machine.read8(f)
+            if v != fadeFlag {
+                if v == 1 { pf.dim(&w) } else if v == 0 { w = pf.restored(base: fadeBase) }
+                fadeFlag = v
+                fadeWorking = w
+            }
+        }
+        func c(_ v: UInt8) -> UInt8 { let x = v & 0x3F; return x << 2 | x >> 4 }
+        let e = fadeEXEBase
+        var out: [PaletteOverride] = []
+        for i in 0..<255 {
+            let k = 3 * i
+            if w[k] == e[k] >> 2 && w[k + 1] == e[k + 1] >> 2 && w[k + 2] == e[k + 2] >> 2 { continue }
+            out.append(PaletteOverride(index: UInt8(i), r: c(w[k]), g: c(w[k + 1]), b: c(w[k + 2])))
+        }
+        return out
+    }
+
     /// Fills the rules-derived fields of `state` and clears the per-frame queues (sounds, texts).
     public func takePresentation(into state: inout PresentationState) {
         let d = glue.ds
@@ -1105,16 +1550,26 @@ public final class RulesRuntime {
             ref.modeWord = UInt16(truncatingIfNeeded: m.ax)
             ref.position = m.pos
             ref.bytes = machine.string(at: m.ds)
+            ref.colour = m.colour
+            ref.serial = messageSerial
+            ref.renderFrames = messageRenders
+            if msgCounterAddr != nil { ref.counter = counter }
             state.message = ref
         } else {
             state.message = nil
         }
         state.soundEvents = pendingSounds
         state.texts = pendingTexts
+        state.spriteSets = pendingSpriteSets
+        if !spriteSetRoutines.isEmpty {
+            state.spriteSetsShown = spriteSetsShown.keys.sorted().map { SpriteSetEvent(routine: $0, selector: spriteSetsShown[$0]!) }
+        }
+        pendingSpriteSets.removeAll(keepingCapacity: true)
+        state.paletteOverrides = fadeOverrides()
         if let pc = paletteCycle, let d = dacRing {
             // 6-bit DAC values -> 8-bit (v << 2 | v >> 4), for the renderer's palette pass.
             func c(_ v: UInt8) -> UInt8 { let x = v & 0x3F; return x << 2 | x >> 4 }
-            state.paletteOverrides = (0..<pc.colours).compactMap { k in
+            state.paletteOverrides += (0..<pc.colours).compactMap { k in
                 let i = pc.firstIndex + k
                 guard i < 256 else { return nil }
                 return PaletteOverride(index: UInt8(i), r: c(d[3 * k]), g: c(d[3 * k + 1]), b: c(d[3 * k + 2]))
@@ -1124,5 +1579,65 @@ public final class RulesRuntime {
         state.music = nil
         pendingSounds.removeAll(keepingCapacity: true)
         pendingTexts.removeAll(keepingCapacity: true)
+    }
+}
+
+// MARK: - Save states (Replay/SimulationSnapshot.swift)
+
+extension RulesRuntime {
+    /// The rules' mutable state: the machine's data segment, MiniX86 (registers, stack, retrace
+    /// toggle), the message / lamp / sound bookkeeping and the queued presentation events. The
+    /// program, glue and caches are derived from the EXE and stay.
+    public struct State {
+        var machine: RulesMachine.State
+        var x86: MiniX86.State
+        var options: RulesOptions
+        var gameOver: Bool
+        var sfxCalls: [[Int]], messageCalls: [[Int]]
+        var warnings: [String], reported: Set<String>
+        var pendingSounds: [SoundEvent], pendingTexts: [TextRef]
+        var message: (ds: Int, ax: Int, pos: Int)?
+        var localCounter: Int, localEffect: Int
+        var lampDrawn: [UInt8]
+        var genericLampTick: Int, sfxPendingDelay: Int
+        var dacRing: [UInt8]?
+        var nativeDepth: Int, directDepth: Int
+        var counterEffects: DotEffects.State?
+        var fadeWorking: [UInt8]?, fadeFlag: UInt8
+        var spriteSetsShown: [Int: Int] = [:]
+    }
+
+    public func saveState() -> State {
+        State(machine: machine.saveState(), x86: x86.saveState(), options: options, gameOver: gameOver, sfxCalls: sfxCalls,
+              messageCalls: messageCalls, warnings: warnings, reported: reported, pendingSounds: pendingSounds,
+              pendingTexts: pendingTexts, message: message.map { ($0.ds, $0.ax, $0.pos) }, localCounter: localCounter,
+              localEffect: localEffect, lampDrawn: lampDrawn, genericLampTick: genericLampTick, sfxPendingDelay: sfxPendingDelay,
+              dacRing: dacRing, nativeDepth: nativeDepth, directDepth: directDepth, counterEffects: counterEffects?.saveState(),
+              fadeWorking: fadeWorking, fadeFlag: fadeFlag, spriteSetsShown: spriteSetsShown)
+    }
+
+    public func restoreState(_ s: State) {
+        machine.restoreState(s.machine); x86.restoreState(s.x86)
+        options = s.options; gameOver = s.gameOver; sfxCalls = s.sfxCalls; messageCalls = s.messageCalls
+        warnings = s.warnings; reported = s.reported; pendingSounds = s.pendingSounds; pendingTexts = s.pendingTexts
+        message = s.message.map { LastMessage(ds: $0.ds, ax: $0.ax, pos: $0.pos) }
+        localCounter = s.localCounter; localEffect = s.localEffect; lampDrawn = s.lampDrawn
+        genericLampTick = s.genericLampTick; sfxPendingDelay = s.sfxPendingDelay; dacRing = s.dacRing
+        nativeDepth = s.nativeDepth; directDepth = s.directDepth
+        if let c = s.counterEffects { counterEffects?.restoreState(c) }
+        fadeWorking = s.fadeWorking; fadeFlag = s.fadeFlag; spriteSetsShown = s.spriteSetsShown
+    }
+
+    /// The rule-visible state: the whole data segment as the rules see it (engine-bound bytes
+    /// included), the machine's memory beyond it, MiniX86 and the bookkeeping. Queued sounds and
+    /// texts are outputs, not state, and are left out.
+    func digest(into h: inout StateHasher) {
+        h.add(machine.snapshot())
+        h.add(machine.mem)
+        x86.digest(into: &h)
+        h.add(gameOver)
+        if let m = message { h.add(m.ds); h.add(m.ax); h.add(m.pos) } else { h.add(-1) }
+        h.add(localCounter); h.add(localEffect); h.add(lampDrawn); h.add(genericLampTick); h.add(sfxPendingDelay)
+        h.add(dacRing ?? [])
     }
 }

@@ -113,6 +113,19 @@ Three modes (`--mode` or `"mode"` in the scenario):
 | `rules` | Same, plus `ball_pixel_scan` cs:1679 (sensors, rule handlers, `obj_writeback`) | Rules work |
 | `full` | The whole real main-loop body cs:04D2..1243 (everything except `frame_sync`), then 3 steps | Reference |
 
+`full` on EP9-EP13 also runs render_frame after the 3 steps (`EpEmu.post_frame`, 2026-10-01): those tables call it after
+frame_sync's physics steps (EP10 cs:1238, after the retrace wait cs:11F0 and the steps cs:1210..1229), outside the body,
+so before this the harness never advanced their message effects or the idle display render_frame shows when a message
+ends (EP10 cs:3EEC). EP1-EP8 call render_frame inside the body (EP1 cs:1236); `post_frame` does nothing there. Ball traces
+are not affected (render_frame writes no physics state; the full suite is unchanged at 413/415). The port does the same
+(`RulesRuntime.renderAfterSteps`). Its calls count for the next frame's record.
+
+Optional scenario key `"watch": {"ds": [[offset, width], ...], "messages": true}` (rules and full mode; ignored in
+physics mode): the last record of every frame gets `extra.watch_ds` (those data-segment values after the frame) and
+`extra.messages` (the frame's dmd_message calls as [BX = string DS offset, AX, DI], from the entry in rules.json
+`stub_routines`), on both sides, so diff_traces.py compares them like any other field. Used by
+`tools/emu/scenarios/EPn/fidelity/` (make_fidelity_scenarios.py).
+
 Main-loop ranges run in `physics` mode, in the original order (call sites in brackets are NOPed
 for the range, with the translation cache invalidated):
 
@@ -209,7 +222,11 @@ The first contact of each wall/kicker scenario was checked in the trace.
    64-iteration guard. Normal play is not known to reach this state.
 3. **The stuck-ball nudge is demo-only [H for code, M for intent].** cs:0C48 jumps to cs:0D1D unless
    `demo_mode` is set, so the "x,y unchanged for 25 frames -> vx += 1" code (cs:0C76..0C95) never runs in a real
-   game. engine.md section 6 lists it as general behaviour.
+   game. engine.md section 6 lists it as general behaviour. Demo mode as a whole is now ported and diffed
+   (docs/enhanced/attract.md): `EpEmu(players='D')` boots it, and scenarios turn it on with
+   `"pokes": {"demo_mode": 1}` (run_scenario.py then pokes no keys: the demo writes the flipper flags itself) or
+   start from the real boot with `"start": "boot"`. Only EP1's demo plunges: EP2-EP13 lack cs:0B79 and hold the
+   plunger forever (900 frames on every table).
 4. **Lane logic [H].** While ball 0 is in the lane (layer 0, x >= 0x118, y >= 0xDC, `serve_delay` = 0) and the
    plunger is not held, **vx is set to 0 every frame** (cs:0B83). On release: `vy -= charge; y -= 1`.
    The Python reference had none of this. With it added (`--plunger-adapter`), both plunger
@@ -414,6 +431,11 @@ table and kind, so reruns give the same files (about 6 s per table).
 | `multi_bounce_upper` | best of 12 fast upper-playfield starts | 4+ responses |
 | `upper_layer_loop` | tables with 200+ level-1 wall pixels; best of 12 layer-1 starts near level-1 walls | 3+ responses |
 | `long_600_scripted` | launch, flips every 45 frames, drain + the table's own serve, second plunge | no hang (the flipper phase is shifted if the original livelocks) |
+
+**Demo-mode sets** (`tools/emu/make_attract_scenarios.py` -> `tools/emu/scenarios/EPn/attract/`, 4 per table: the
+real `'D'` boot, the serve, a drop onto each flipper; full mode only, not part of `run_suite.py`'s sets):
+`diff_traces.py -q --mode full --table N tools/emu/scenarios/EPn/attract`, and `tools/emu/attract_check.py` for the
+dmd_message calls (and EP1's data segment) frame by frame. Results in docs/enhanced/attract.md.
 
 Sets written (the generated EP1 set is a check of the generator): EP1 18, EP2 19, EP3 19, EP4 21 (all 4 flippers), EP5 18 (no
 upper-layer scenario: 78 level-1 pixels), EP6 19, EP7 19, EP8 13 (no bumper/slingshot: EP8's toys are not in its collision

@@ -23,6 +23,8 @@ public final class AudioEngine: @unchecked Sendable {
     private let mixer: ClassicMixer
     private let queue = CommandQueue()
     public private(set) var isRunning = false
+    /// Resampling of effects and music (control-thread copy; the mixer follows via a command).
+    public private(set) var interpolation: AudioInterpolation
 
     /// Opens the table's bank and song from the user's `original/` directory.
     /// A missing song is not fatal (effects still play); a missing bank throws.
@@ -33,6 +35,7 @@ public final class AudioEngine: @unchecked Sendable {
         let hw = engine.outputNode.outputFormat(forBus: 0).sampleRate
         sampleRate = hw > 0 ? Int(hw.rounded()) : 48000
         mixer = ClassicMixer(bank: bank, sampleRate: sampleRate, options: options)
+        interpolation = options.interpolation
         _ = try? loadSong(ClassicSoundMap.song(forTable: table))
     }
 
@@ -49,7 +52,7 @@ public final class AudioEngine: @unchecked Sendable {
         }
         let m = try MusicModule.load(originalDir: originalDir, song: song)
         modules[song] = m
-        mixer.install(module: m, song: song)
+        mixer.install(module: m, song: song, interpolation: interpolation)
         return m
     }
 
@@ -157,6 +160,14 @@ public final class AudioEngine: @unchecked Sendable {
 
     public func setVolumes(_ v: AudioVolumes) {
         queue.push(.volumes(master: v.master, sfx: v.sfx, music: v.music))
+    }
+
+    /// Switches resampling live (Settings > Audio): effects and the loaded songs from the next
+    /// render block on.
+    public func setInterpolation(_ i: AudioInterpolation) {
+        guard i != interpolation else { return }
+        interpolation = i
+        queue.push(.interpolation(smooth: i == .smooth))
     }
 
     public func setVolumes(master: Float, sfx: Float, music: Float) {

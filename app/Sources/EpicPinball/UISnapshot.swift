@@ -1,12 +1,15 @@
 import AppKit
+import PinballCore
 import SwiftUI
 
 /// `--ui-snapshot PATH --ui-screen S`: renders a front-end screen in an offscreen window and
 /// writes it as PNG (verification without driving the UI). The overlay screens are drawn over
 /// a plain background with sample scores; the launcher shows the user's tables and scores.
+/// `--rotate D` turns the overlay screens as a cabinet picture rotation does (`CabinetRotated`).
 enum UISnapshot {
     @MainActor
-    static func run(screen: String, model: AppModel, size: (Int, Int)?, to path: String) throws {
+    static func run(screen: String, model: AppModel, size: (Int, Int)?, to path: String,
+                    rotation: GameSettings.DisplayRotation = .none) throws {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let (w, h) = size ?? (1180, 800)
@@ -15,8 +18,26 @@ enum UISnapshot {
         case "import":
             model.screen = .importer
             content = AnyView(ImportView(model: model))
-        case "settings":
-            content = AnyView(SettingsView(model: model) {}.background(Color(nsColor: .windowBackgroundColor)))
+        case "import-done":
+            // The end of an import: the HD pack offer (ImportDone.swift).
+            model.screen = .importer
+            model.importState = .finished(tables: model.tables.filter(\.available).count, warnings: [])
+            content = AnyView(ImportView(model: model))
+        case "launcher-hdpacks":
+            // The picker while packs are made in the background (a sample progress state).
+            model.screen = .picker
+            model.hdPackState = .running(fraction: 0.42, message: "Table 6 (6 of 13)…")
+            content = AnyView(LauncherView(model: model))
+        case let s where s == "settings" || s.hasPrefix("settings-"):
+            let tab = SettingsView.tabNames.firstIndex(of: String(s.dropFirst("settings-".count))) ?? 0
+            if s == "settings-library",
+               let scale = ProcessInfo.processInfo.environment["EPIC_PINBALL_UI_HDPACK_SCALE"].flatMap({ Int($0) }) {
+                // EPIC_PINBALL_UI_HDPACK_SCALE=S: start "Generate HD packs" (all tables) first, so the
+                // snapshot shows the job running (it is not waited for).
+                model.generateHDPacks(tables: model.tables.filter(\.available).map(\.number), scale: scale)
+            }
+            content = AnyView(SettingsView(model: model, onClose: {}, tab: tab, height: CGFloat(size?.1 ?? Int(SettingsView.sheetSize.height)))
+                .background(Color(nsColor: .windowBackgroundColor)))
         case "pause", "initials", "gameover":
             let o = OverlayModel()
             o.tableName = model.selectedTable?.name ?? "Table 1"
@@ -37,7 +58,7 @@ enum UISnapshot {
                 } else {
                     Theme.background
                 }
-                GameOverlayView(model: o)
+                GameOverlayView(model: o, orientation: OverlayOrientation(rotation: rotation))
             })
         default:
             model.screen = .picker

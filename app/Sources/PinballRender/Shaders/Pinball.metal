@@ -35,6 +35,14 @@ struct SceneUniforms {
     float4 overlayInfo;      // x: 1 = draw the window dot overlay, y: overlay rows
 };
 
+// Balls in slots 1...4 (multiball), drawn after ball 0 in slot order (Renderer.swift ExtraBallUniforms).
+struct ExtraBalls {
+    float4 info;             // x: number of balls
+    float4 ball[4];          // xy: top-left, zw: box size
+    float4 kind[4];          // x: 1 indexed sprite, 2 procedural
+    uint4  pixels[56];       // 14 uint4 per ball, as SceneUniforms.ballPixels
+};
+
 struct PresentUniforms {
     float4 dst;   // xy: viewport origin (output px), zw: output px per source px (x, y)
     float4 src;   // x: source width, y: visible window rows, z: fractional row offset, w: unused
@@ -61,13 +69,41 @@ static float sd_capsule(float2 p, float2 a, float2 b, float r) {
 
 static float coverage(float d) { return clamp(0.5 - d, 0.0, 1.0); }
 
-static uint ball_index(constant SceneUniforms &u, uint i) {
-    uint word = u.ballPixels[i >> 4][(i >> 2) & 3];
+static uint ball_index(constant uint4 *px, uint i) {
+    uint word = px[i >> 4][(i >> 2) & 3];
     return (word >> ((i & 3) * 8)) & 0xFF;
+}
+
+// One ball: composited 15x14 index sprite (occluders already merged on the CPU, key 0), or the
+// procedural fallback.
+static float3 draw_ball(float3 color, int tx, int ty, float2 p, float4 ball, float kind, constant uint4 *px,
+                        texture1d<float, access::read> palette) {
+    if (kind > 0.5 && kind < 1.5) {
+        int2 local = int2(floor(float2(tx, ty) - ball.xy));
+        int2 size = int2(ball.zw);
+        if (local.x >= 0 && local.y >= 0 && local.x < size.x && local.y < size.y) {
+            uint bi = ball_index(px, uint(local.y * size.x + local.x));
+            if (bi != 0) { color = palette.read(bi).rgb; }
+        }
+    } else if (kind > 1.5) {
+        float2 c = ball.xy + ball.zw * 0.5;
+        float r = min(ball.z, ball.w) * 0.5;
+        float2 rel = p - c;
+        float d = length(rel) - r;
+        float2 n2 = rel / max(r, 1e-3);
+        float3 n = float3(n2, sqrt(max(1.0 - dot(n2, n2), 0.0)));
+        float3 l = normalize(float3(-0.5, -0.6, 0.65));
+        float diff = max(dot(n, l), 0.0);
+        float spec = pow(max(dot(reflect(-l, n), float3(0, 0, 1)), 0.0), 12.0);
+        float3 steel = float3(0.35, 0.37, 0.42) + 0.55 * diff + 0.6 * spec;
+        color = mix(color, clamp(steel, 0.0, 1.0), coverage(d));
+    }
+    return color;
 }
 
 fragment float4 scene_fragment(VSOut in [[stage_in]],
                                constant SceneUniforms &u [[buffer(0)]],
+                               constant ExtraBalls &xb [[buffer(1)]],
                                texture2d<uint, access::read> indices [[texture(0)]],
                                texture1d<float, access::read> palette [[texture(1)]],
                                texture2d<float, access::read> atlas [[texture(2)]],
@@ -97,26 +133,10 @@ fragment float4 scene_fragment(VSOut in [[stage_in]],
         }
     }
 
-    // Ball: composited 15x14 index sprite (occluders already merged on the CPU), key 0.
-    if (u.ballInfo.x > 0.5 && u.ballInfo.x < 1.5) {
-        int2 local = int2(floor(float2(tx, ty) - u.ball.xy));
-        int2 size = int2(u.ball.zw);
-        if (local.x >= 0 && local.y >= 0 && local.x < size.x && local.y < size.y) {
-            uint bi = ball_index(u, uint(local.y * size.x + local.x));
-            if (bi != 0) { color = palette.read(bi).rgb; }
-        }
-    } else if (u.ballInfo.x > 1.5) {
-        float2 c = u.ball.xy + u.ball.zw * 0.5;
-        float r = min(u.ball.z, u.ball.w) * 0.5;
-        float2 rel = p - c;
-        float d = length(rel) - r;
-        float2 n2 = rel / max(r, 1e-3);
-        float3 n = float3(n2, sqrt(max(1.0 - dot(n2, n2), 0.0)));
-        float3 l = normalize(float3(-0.5, -0.6, 0.65));
-        float diff = max(dot(n, l), 0.0);
-        float spec = pow(max(dot(reflect(-l, n), float3(0, 0, 1)), 0.0), 12.0);
-        float3 steel = float3(0.35, 0.37, 0.42) + 0.55 * diff + 0.6 * spec;
-        color = mix(color, clamp(steel, 0.0, 1.0), coverage(d));
+    // Balls: slot 0, then the other slots in play (the original's per-ball loop, EP1 cs:11A7).
+    color = draw_ball(color, tx, ty, p, u.ball, u.ballInfo.x, u.ballPixels, palette);
+    for (int i = 0; i < min(int(xb.info.x), 4); i++) {
+        color = draw_ball(color, tx, ty, p, xb.ball[i], xb.kind[i].x, xb.pixels + 14 * i, palette);
     }
 
     // Dot messages: window-relative, plotted on top of everything (render_frame cs:43D5).
@@ -232,7 +252,33 @@ struct EnhSceneUniforms {
     float4 view;          // x: first table row, y: rows rendered, z: HD scale S (1 = native), w: flipper cross-fade alpha
     float4 flipRect[4];   // xy: top-left, zw: size (table px)
     float4 flipInfo[4];   // x: 1 = cross-fade, y: atlas row of the previous frame, z: atlas row of the current frame
+    // Rotated flippers (FlipperRotation.swift). scene_hd draws them; scene_enhanced (no HD pack, the
+    // present pass rotates them at output resolution) only writes the background under them.
+    float4 rotRect[4];    // xy: union rect of the frames (table px), zw: size
+    float4 rotPivot[4];   // xy: pivot (table px), z: first row in the native frame atlas, w: frame count
+    float4 rotFrames[4];  // x: HD atlas row of frame k0, y: its rotation (rad), z: row of frame k1, w: its rotation
+    float4 rotInfo[4];    // x: 1 = rotate, y: weight of k1, z: HD atlas row of the background
+                          //    (scene_enhanced: row in the native background atlas), w: sub-image padding
 };
+
+// The pixel at union-rect position `local` shows one of the flipper's frames (VRAM index `idx`), i.e.
+// no lamp or other record was blitted over the flipper there.
+static bool rot_owned(texture2d<uint, access::read> rotNative, int2 local, int2 size, float4 pivot, uint idx) {
+    if (local.x < 0 || local.y < 0 || local.x >= size.x || local.y >= size.y) { return false; }
+    for (int k = 0; k < int(pivot.w); k++) {
+        uint v = rotNative.read(uint2(local.x, int(pivot.z) + k * size.y + local.y)).r;
+        if (v != 0u && v - 1u == idx) { return true; }
+    }
+    return false;
+}
+
+// Premultiplied HD flipper sprite at table position q (bilinear; clamped to the padded sub-image,
+// whose transparent border makes the outside 0).
+static float4 rot_sample(texture2d<float, access::sample> atlas, sampler s, float2 q, float4 rect, float row, float pad, float S) {
+    float2 size = rect.zw * S + 2.0 * pad;
+    float2 hp = clamp((q - rect.xy) * S + pad, float2(0.5), size - 0.5);
+    return atlas.sample(s, float2(hp.x, row + hp.y) / float2(atlas.get_width(), atlas.get_height()));
+}
 
 static float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
 
@@ -240,12 +286,21 @@ fragment float4 scene_enhanced(VSOut in [[stage_in]],
                                constant EnhSceneUniforms &u [[buffer(0)]],
                                texture2d<uint, access::read> indices [[texture(0)]],
                                texture1d<float, access::read> palette [[texture(1)]],
-                               texture2d<uint, access::read> flipAtlas [[texture(2)]]) {
+                               texture2d<uint, access::read> flipAtlas [[texture(2)]],
+                               texture2d<uint, access::read> rotNative [[texture(3)]],
+                               texture2d<uint, access::read> rotBackground [[texture(4)]]) {
     uint2 pix = uint2(in.position.xy);
     int ty = clamp(int(u.view.x) + int(pix.y), 0, 399);
     int tx = clamp(int(pix.x), 0, 319);
     uint idx = indices.read(uint2(tx, ty)).r;
     float3 c = palette.read(idx).rgb;
+    // Flippers rotated by the present pass: the table without the flipper where VRAM shows a frame.
+    for (int i = 0; i < 4; i++) {
+        if (u.rotInfo[i].x < 0.5) { continue; }
+        int2 local = int2(tx, ty) - int2(u.rotRect[i].xy);
+        if (!rot_owned(rotNative, local, int2(u.rotRect[i].zw), u.rotPivot[i], idx)) { continue; }
+        c = palette.read(rotBackground.read(uint2(local.x, int(u.rotInfo[i].z) + local.y)).r).rgb;
+    }
     for (int i = 0; i < 4; i++) {
         if (u.flipInfo[i].x < 0.5) { continue; }
         int2 local = int2(tx, ty) - int2(u.flipRect[i].xy);
@@ -266,7 +321,10 @@ fragment float4 scene_hd(VSOut in [[stage_in]],
                          texture1d<float, access::read> palette [[texture(2)]],
                          texture1d<float, access::read> basePalette [[texture(3)]],
                          texture2d<uint, access::read> flipAtlas [[texture(4)]],
-                         texture2d<float, access::read> flipAtlasHD [[texture(5)]]) {
+                         texture2d<float, access::read> flipAtlasHD [[texture(5)]],
+                         texture2d<uint, access::read> rotNative [[texture(6)]],
+                         texture2d<float, access::sample> rotAtlas [[texture(7)]]) {
+    constexpr sampler lin(filter::linear, address::clamp_to_edge, coord::normalized);
     int S = int(u.view.z);
     uint2 pix = uint2(in.position.xy);
     int hy = clamp(int(u.view.x) * S + int(pix.y), 0, 400 * S - 1);
@@ -274,6 +332,26 @@ fragment float4 scene_hd(VSOut in [[stage_in]],
     float3 c = hdVram.read(uint2(hx, hy)).rgb;
     int tx = hx / S, ty = hy / S;
     uint idx = indices.read(uint2(tx, ty)).r;
+    // Rotated flippers: where VRAM still shows one of the flipper's frames (not a lamp blitted over
+    // it), the clean background with the two nearest frames' sprites rotated about the pivot.
+    for (int i = 0; i < 4; i++) {
+        if (u.rotInfo[i].x < 0.5) { continue; }
+        int2 local = int2(tx, ty) - int2(u.rotRect[i].xy);
+        if (!rot_owned(rotNative, local, int2(u.rotRect[i].zw), u.rotPivot[i], idx)) { continue; }
+        float fS = float(S), pad = u.rotInfo[i].w;
+        float2 q = (float2(hx, hy) + 0.5) / fS;           // table px
+        float2 d = q - u.rotPivot[i].xy;
+        float r0 = u.rotFrames[i].y, r1 = u.rotFrames[i].w;
+        // A point of the frame turned by r comes from pivot + R(-r) (q - pivot) of the frame.
+        float2 q0 = u.rotPivot[i].xy + float2(cos(r0) * d.x + sin(r0) * d.y, -sin(r0) * d.x + cos(r0) * d.y);
+        float2 q1 = u.rotPivot[i].xy + float2(cos(r1) * d.x + sin(r1) * d.y, -sin(r1) * d.x + cos(r1) * d.y);
+        float4 s0 = rot_sample(rotAtlas, lin, q0, u.rotRect[i], u.rotFrames[i].x, pad, fS);
+        float4 s1 = rot_sample(rotAtlas, lin, q1, u.rotRect[i], u.rotFrames[i].z, pad, fS);
+        float4 sp = mix(s0, s1, u.rotInfo[i].y);
+        int2 bp = int2(hx, hy) - int2(u.rotRect[i].xy) * S + int2(pad);
+        float3 bg = rotAtlas.read(uint2(bp.x, int(u.rotInfo[i].z) + bp.y)).rgb;
+        c = sp.rgb + (1.0 - sp.a) * bg;
+    }
     for (int i = 0; i < 4; i++) {
         if (u.flipInfo[i].x < 0.5) { continue; }
         int2 local = int2(tx, ty) - int2(u.flipRect[i].xy);
@@ -579,6 +657,7 @@ constant bool FC_OCCLUSION [[function_constant(7)]];
 constant bool FC_DOTS      [[function_constant(8)]];
 constant bool FC_ROUND     [[function_constant(9)]];
 constant bool FC_CURVE     [[function_constant(10)]];
+constant bool FC_ROTATE    [[function_constant(11)]];  // flippers rotated at output resolution (no HD pack)
 
 struct EnhPresentUniforms {
     float4 dst;      // xy: viewport origin (output px), zw: output px per screen px (x, y)
@@ -590,7 +669,44 @@ struct EnhPresentUniforms {
     float4 light;    // x: glow gain, y: shadow, z: specular, w: unused
     float4 crt;      // x: curvature, y: scanline depth, z: mask strength, w: unused
     float4 viewport; // xy: viewport size (output px), z: glow texture rows, w: unused
+    float4 extra;        // x: balls after `ball` (multiball), drawn in slot order
+    float4 extraBall[4]; // xy: top-left (table px, interpolated), zw: box size
+    float4 extraInfo[4]; // z: occlusion level
+    // Flippers rotated at output resolution (FC_ROTATE; FlipperRotation.swift NativeFlipperRotation):
+    float4 rotRect[4];   // xy: union rect (table px), zw: size
+    float4 rotPivot[4];  // xy: pivot (table px), z: first row in the native frame atlas, w: frame count
+    float4 rotFrames[4]; // x: sprite atlas row of frame k0, y: its rotation (rad), z: row of frame k1, w: its rotation
+    float4 rotInfo[4];   // x: 1 = rotate, y: weight of k1, z: sprite scale (sprite px per table px), w: padding
 };
+
+// The rotated flipper sprites over the filtered window colour at table position tp. The sprites are
+// the game's frames upscaled by the active filter (flipper_upscale) and split (premultiplied); the
+// window under them is the filtered background (scene_enhanced). Palette effects shift the sprite
+// by the change of the native pixel's palette entry, as scene_hd does.
+static float3 rotated_flippers(constant EnhPresentUniforms &u, float2 tp, float3 color, sampler s,
+                               texture2d<uint, access::read> indices, texture2d<uint, access::read> rotNative,
+                               texture2d<float, access::sample> rotAtlas, texture1d<float, access::read> palette,
+                               texture1d<float, access::read> basePalette) {
+    int2 ti = clamp(int2(floor(tp)), int2(0), int2(319, 399));
+    for (int i = 0; i < 4; i++) {
+        if (u.rotInfo[i].x < 0.5) { continue; }
+        // Outside the union rectangle (almost every pixel): nothing to read.
+        int2 local = ti - int2(u.rotRect[i].xy), size = int2(u.rotRect[i].zw);
+        if (local.x < 0 || local.y < 0 || local.x >= size.x || local.y >= size.y) { continue; }
+        uint idx = indices.read(uint2(ti)).r;
+        if (!rot_owned(rotNative, local, size, u.rotPivot[i], idx)) { continue; }
+        float2 d = tp - u.rotPivot[i].xy;
+        float r0 = u.rotFrames[i].y, r1 = u.rotFrames[i].w;
+        float2 q0 = u.rotPivot[i].xy + float2(cos(r0) * d.x + sin(r0) * d.y, -sin(r0) * d.x + cos(r0) * d.y);
+        float2 q1 = u.rotPivot[i].xy + float2(cos(r1) * d.x + sin(r1) * d.y, -sin(r1) * d.x + cos(r1) * d.y);
+        float4 s0 = rot_sample(rotAtlas, s, q0, u.rotRect[i], u.rotFrames[i].x, u.rotInfo[i].w, u.rotInfo[i].z);
+        float4 s1 = rot_sample(rotAtlas, s, q1, u.rotRect[i], u.rotFrames[i].z, u.rotInfo[i].w, u.rotInfo[i].z);
+        float4 sp = mix(s0, s1, u.rotInfo[i].y);
+        float3 delta = palette.read(idx).rgb - basePalette.read(idx).rgb;
+        color = sp.rgb + sp.a * delta + (1.0 - sp.a) * color;
+    }
+    return color;
+}
 
 // One layer (window or strip): q in layer px (table px), S = texture px per layer px.
 static float4 filter_layer(texture2d<float, access::sample> t, texture2d<uint, access::read> blend, sampler s,
@@ -613,6 +729,7 @@ static float4 filter_layer(texture2d<float, access::sample> t, texture2d<uint, a
 // Premultiplied ball colour at ball-local position bl.
 static float4 ball_layer(constant EnhPresentUniforms &u, float2 bl, float2 sc, sampler s,
                          texture2d<float, access::sample> ballTex, texture2d<uint, access::read> ballBlend) {
+    // (every ball has the same box size, u.ball.zw)
     if (FC_BALL == 2) {
         float2 c = u.ball.zw * 0.5;
         float r = min(u.ball.z, u.ball.w) * 0.5;
@@ -646,7 +763,11 @@ fragment float4 present_enhanced(VSOut in [[stage_in]],
                                  texture2d<float, access::sample> glow [[texture(6)]],
                                  texture2d<uint, access::read> occlusion [[texture(7)]],
                                  texture2d<float, access::sample> ballTex [[texture(8)]],
-                                 texture2d<uint, access::read> ballBlend [[texture(9)]]) {
+                                 texture2d<uint, access::read> ballBlend [[texture(9)]],
+                                 texture2d<uint, access::read> rotIndices [[texture(10), function_constant(FC_ROTATE)]],
+                                 texture2d<uint, access::read> rotNative [[texture(11), function_constant(FC_ROTATE)]],
+                                 texture2d<float, access::sample> rotAtlas [[texture(12), function_constant(FC_ROTATE)]],
+                                 texture1d<float, access::read> basePalette [[texture(13), function_constant(FC_ROTATE)]]) {
     constexpr sampler lin(filter::linear, address::clamp_to_edge, coord::normalized);
     float2 sc = u.dst.zw;
     float2 local = (in.position.xy - u.dst.xy) / u.dst.zw;   // screen px
@@ -671,16 +792,20 @@ fragment float4 present_enhanced(VSOut in [[stage_in]],
         float2 q = float2(local.x, local.y + u.src.z);       // window texture px (row 0 = first table row)
         float2 tp = float2(q.x, q.y + u.frame.y);            // table px
         color = filter_layer(frame, frameBlend, lin, q, float2(u.src.x, u.frame.x), u.mode.y, FC_WIN_HD, sc).rgb;
+        if (FC_ROTATE) { color = rotated_flippers(u, tp, color, lin, rotIndices, rotNative, rotAtlas, palette, basePalette); }
         float2 guv = float2(q.x / u.src.x, q.y / u.viewport.z);
         if (FC_LIGHT) { color += glow.sample(lin, guv).rgb * u.light.x; }
-        if (FC_BALL != 0) {
-            float2 bl = tp - u.ball.xy;
+        // Balls: the first one in `ball`, then the others (multiball) in slot order on top.
+        int nBalls = FC_BALL != 0 ? 1 + min(int(u.extra.x), 4) : 0;
+        for (int j = 0; j < nBalls; j++) {
+            float2 bl = tp - (j == 0 ? u.ball.xy : u.extraBall[j - 1].xy);
+            float lvl = j == 0 ? u.ballInfo.z : u.extraInfo[j - 1].z;
             float2 bc = u.ball.zw * 0.5;
             if (all(bl > -6.0) && all(bl < u.ball.zw + 6.0)) {
                 bool hidden = false;
                 if (FC_OCCLUSION) {
                     int2 ti = clamp(int2(floor(tp)), int2(0), int2(319, 399));
-                    hidden = ((occlusion.read(uint2(ti)).r >> uint(u.ballInfo.z)) & 1u) != 0u;
+                    hidden = ((occlusion.read(uint2(ti)).r >> uint(lvl)) & 1u) != 0u;
                 }
                 if (FC_LIGHT && !hidden) {
                     // Soft contact shadow, offset away from the light (top-left).
@@ -738,4 +863,37 @@ fragment float4 present_enhanced(VSOut in [[stage_in]],
         color *= (1.0 - dot(vv, vv) * 0.35) * edge;
     }
     return float4(clamp(color, 0.0, 1.0), 1.0);
+}
+
+// Rotated flippers without an HD pack (FlipperRotation.swift NativeFlipperRotationJob): one flipper
+// frame, in a crop of the playfield with a margin, upscaled K times with the active filter's own
+// functions (xBRZ, or Catmull-Rom for smooth and CRT, whose scanlines are applied later over the
+// whole picture). u.x: 2 xBRZ (blend = xbrz_prepass of src), else bicubic; u.y: K; u.z: margin (src px).
+kernel void flipper_upscale(texture2d<float, access::sample> src [[texture(0)]],
+                            texture2d<uint, access::read> blend [[texture(1)]],
+                            texture2d<float, access::write> dst [[texture(2)]],
+                            constant float4 &u [[buffer(0)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= dst.get_width() || gid.y >= dst.get_height()) { return; }
+    constexpr sampler lin(filter::linear, address::clamp_to_edge, coord::normalized);
+    float2 size = float2(src.get_width(), src.get_height());
+    float2 q = (float2(gid) + 0.5) / u.y + u.z;
+    float4 c = int(u.x) == 2 ? xbrz_sample(src, blend, int2(size) - 1, q, u.y) : bicubic(src, lin, q, size - 0.5, 1.0 / size);
+    dst.write(float4(c.rgb, 1.0), gid);
+}
+
+// ---- display rotation (cabinet / portrait monitors, DisplayRotation.swift) ------------------
+// Turns the upright frame (rendered at the output size with axes swapped for 90/270) into the
+// output in whole pixels. u.x: clockwise quarter turns, u.yz: output width, height.
+fragment float4 present_rotate(VSOut in [[stage_in]],
+                               constant int4 &u [[buffer(0)]],
+                               texture2d<float, access::read> upright [[texture(0)]]) {
+    int2 p = int2(in.position.xy);
+    int W = u.y, H = u.z;
+    int2 l = p;
+    if (u.x == 1) { l = int2(p.y, W - 1 - p.x); }
+    else if (u.x == 2) { l = int2(W - 1 - p.x, H - 1 - p.y); }
+    else if (u.x == 3) { l = int2(H - 1 - p.y, p.x); }
+    int2 lim = int2(upright.get_width(), upright.get_height()) - 1;
+    return upright.read(uint2(clamp(l, int2(0), lim)));
 }

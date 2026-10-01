@@ -19,7 +19,10 @@ game. Read `README.md` and `NOTICE` for the legal position.
   keep it at **830/830**:
   `.venv/bin/python tools/emu/run_suite.py --modes physics,rules`.
   Full mode is 413/415; the 2 misses are known EP8 harness errors. Both rules
-  backends (`EPIC_PINBALL_RULES=direct|lifted`) must pass.
+  backends (`EPIC_PINBALL_RULES=direct|lifted`) must pass. After rules changes also run
+  the `tools/emu/scenarios/EPn/fidelity` scenarios (72, all EXACT in full mode; not in
+  run_suite's sets). The lifted backend reads the local `extracted/tables/EPn/rules.json`:
+  regenerate it with `tools/rules.py` whenever `tools/rules.py` changes.
 - New artwork (icons, UI) must be original. Never recreate the game's
   characters, logos or table art.
 - Docs describe formats, offsets and code behaviour. Do not paste the game's
@@ -29,13 +32,15 @@ game. Read `README.md` and `NOTICE` for the legal position.
 ## Commands
 
 ```sh
-cd app && swift build && swift test          # 229 tests; 4 opt-in skips (live audio, perf, ...)
+cd app && swift build && swift test          # 344 tests; 6 opt-in skips (live audio, GPU perf x3, ...)
 swift run EpicPinball --table 1              # dev run; --library DIR, --physics enhanced,
                                              # --render/--filter, --snapshot out.png, --autoplay N,
                                              # --trace scenario.json, --headless-import CD.iso
 tools/package_app.sh                         # build/EpicPinballHD.app + zip; sandboxed runtime check
 .venv/bin/python tools/emu/diff_traces.py --table N [--mode physics|rules|full] -q
 .venv/bin/python tools/emu/run_suite.py --modes physics,rules
+for N in $(seq 2 13); do .venv/bin/python tools/emu/diff_traces.py --table $N --mode full -q tools/emu/scenarios/EP$N/fidelity; done
+.venv/bin/python tools/rules.py 2 3 4 5 6 7 8 9 10 11 12 13   # regenerate local lifted rules.json
 ```
 
 - Toolchain: Swift 6.4 via swiftly (`.swift-version`). Xcode 26's 6.3.3 also works.
@@ -44,7 +49,7 @@ tools/package_app.sh                         # build/EpicPinballHD.app + zip; sa
   only used for checks against the running game.
 - Python venv `.venv` (numpy, pillow, capstone, unicorn) is used for the tools
   only. The app needs no Python.
-- `swift test` takes about 10 minutes. The live differential tests need the
+- `swift test` takes about 30 minutes. The live differential tests need the
   user's data and skip cleanly without it.
 
 ## Layout

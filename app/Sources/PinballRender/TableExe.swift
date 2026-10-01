@@ -111,6 +111,11 @@ public struct StripSpec: Sendable, Equatable {
     /// (EP10 cs:3483-348A, colour from ds:00C5 set just before), 10 digits after one pad cell.
     public var scoreDotDI: Int? = nil
     public var scoreDotColour: UInt8 = 0xFF
+    /// EP9-13: render_frame clears the strip every frame it plots (the idle display is a dot message
+    /// too): row 0 to `dotBorder`, rows 1-29 to `dotFill` (EP10 cs:3F07 `mov ax,2222h; mov cx,28h;
+    /// rep stosw`, cs:3F1D AEh over 488h words; EP11 cs:3F0C stores 2222h then 1010h). nil = not found.
+    public var dotBorder: UInt8? = nil
+    public var dotFill: UInt8? = nil
     /// EP9-13: default message dot colour = the value most often stored into the dot-colour
     /// byte in the code (EP10: 0xFF into ds:00C5, 12 of 22 stores; DAC 255 is set by dmd_message).
     public var messageDotColour: UInt8 = 0xFF
@@ -172,6 +177,7 @@ public struct StripSpec: Sendable, Equatable {
             && a.cameraMaxShown == b.cameraMaxShown && a.cameraMaxHidden == b.cameraMaxHidden
             && a.clearRows == b.clearRows && a.scoreDotDI == b.scoreDotDI && a.scoreDotColour == b.scoreDotColour
             && a.textRoutines == b.textRoutines && a.messageDotColour == b.messageDotColour
+            && a.dotBorder == b.dotBorder && a.dotFill == b.dotFill
     }
 
     public init() {}
@@ -270,6 +276,17 @@ public struct StripSpec: Sendable, Equatable {
         // Window dot plotter (render_frame cs:43D5): mov es,[page]; mov dx,3CEh; mov al,4; out
         // (EP1-8 have it; EP9-13 only have the strip version).
         s.messagesInStrip = exe.find([0x8E, 0x06, nil, nil, 0xBA, 0xCE, 0x03, 0xB0, 0x04, 0xEE], in: code, limit: 1).isEmpty
+        // EP9-13 render_frame strip clear: mov ax,0Fh; out dx,al; (mov ax,v)+; mov cx,n; rep stosw
+        // (n = 28h: row 0, 488h: rows 1-29; the last `mov ax` wins).
+        if s.messagesInStrip {
+            for o in exe.find([0xB8, 0x0F, 0x00, 0xEE, 0xB8], in: code) {
+                var i = o + 4, v: UInt8?
+                while exe.bytes[i] == 0xB8 { v = exe.bytes[i + 1]; i += 3 }
+                guard let v, exe.bytes[i] == 0xB9, exe.bytes[i + 3] == 0xF3, exe.bytes[i + 4] == 0xAB else { continue }
+                let n = w(i + 1)
+                if n == 0x28, s.dotBorder == nil { s.dotBorder = v } else if n == 0x488, s.dotBorder != nil, s.dotFill == nil { s.dotFill = v }
+            }
+        }
         // plunger: shr ax,n; add ax,base; call far draw_plunger (n = 5, or 6 in EP11-13)
         if let o = exe.find([0xC1, 0xE8, nil, 0x05, nil, nil, 0x9A], in: code, limit: 1).first {
             s.plungerShift = Int(exe.bytes[o + 2]); s.plungerBaseY = w(o + 4)

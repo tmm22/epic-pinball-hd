@@ -73,6 +73,8 @@ public final class RulesMachine {
     private var stack: [StackItem] = []
     private var steps = 0
     private var currentBlock = -1
+    /// ip of the block being interpreted (display events use it to find their call site).
+    public var currentBlockIP: Int? { currentBlock >= 0 && currentBlock < program.blocks.count ? program.blocks[currentBlock].ip : nil }
     private var depth = 0
     /// The pixel value the kicker probe hit (EP2/EP10 `contact_colour`).
     public var contactColour = 0
@@ -470,5 +472,27 @@ public final class RulesMachine {
         }
         write8(b + 10, UInt8(0x30 + v))
         write8(b + 12, 0)
+    }
+}
+
+// MARK: - Save states (Replay/SimulationSnapshot.swift)
+
+extension RulesMachine {
+    /// The data segment bytes the machine owns (engine-bound bytes live in the engine's state) and
+    /// what survives a call. Registers and the graph stack are reset by every `call`.
+    public struct State {
+        var mem: [UInt8]
+        var faults: [String]
+        var contactColour: Int
+        var watchedHits: Set<Int>
+        var lastStopIP: Int?
+    }
+
+    public func saveState() -> State {
+        State(mem: mem, faults: faults, contactColour: contactColour, watchedHits: watchedHits, lastStopIP: lastStopIP)
+    }
+
+    public func restoreState(_ s: State) {
+        mem = s.mem; faults = s.faults; contactColour = s.contactColour; watchedHits = s.watchedHits; lastStopIP = s.lastStopIP
     }
 }

@@ -15,6 +15,10 @@ public struct DotMessage: Sendable, Equatable {
     /// Dot colour. EP1-8 always plot DAC 255 (render_frame cs:43D5); EP9-13 store a colour
     /// byte before the call (EP10 ds:00C5), nil = the table's most common one.
     public var colour: UInt8?
+    /// The dots as render_frame's effects have moved them this frame (`MessageAnimator`), replacing
+    /// the static list of `text` + `appended`; `liveColours` = their palette indices (EP9-13).
+    public var liveDots: [Int]? = nil
+    public var liveColours: [UInt8]? = nil
     public init(text: [UInt8], ax: Int, di: Int, appended: [DotLine] = [], colour: UInt8? = nil) {
         self.text = text; self.ax = ax; self.di = di; self.appended = appended; self.colour = colour
     }

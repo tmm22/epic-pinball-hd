@@ -1925,6 +1925,24 @@ def _code_info(t, L, a, b, seen=None, depth=0):
     return True, W, Rd, keys
 
 
+def _calls_message(t, L, a, b, seen=None):
+    """Whether cs:a..b (following rule-like near calls) calls the dot-matrix message routine.  Such a
+    main-loop statement is rule code even when it writes nothing rule code reads: the message is what the
+    player sees (EP2 cs:04AB..0530, a message every 280 frames until the first plunger release)."""
+    seen = set() if seen is None else seen
+    for i in _iter_insns(t, a, b):
+        if i.mnemonic != "call" or i.operands[0].type != X.X86_OP_IMM:
+            continue
+        tgt = i.operands[0].imm
+        if t.routines.get(tgt) == "message":
+            return True
+        if tgt not in seen and L.rule_like(tgt):
+            seen.add(tgt)
+            if _calls_message(t, L, tgt, _routine_end(t, tgt), seen):
+                return True
+    return False
+
+
 def _regions(t, L, entry, end):
     """Maximal liftable regions of the routine cs:entry..end: control flow is followed from each region
     start and cut at every instruction the lifter cannot express (fades, waits, graphics calls); the
@@ -1945,7 +1963,7 @@ def _regions(t, L, entry, end):
                 ok, _ = _insn_ok(t, L, i)
                 if not ok:
                     cuts.add(x)
-                    todo.append(x + i.size)
+                    todo.append(_cut_next(t, x))
                     break
                 seen.add(x)
                 m = i.mnemonic
@@ -1959,6 +1977,47 @@ def _regions(t, L, entry, end):
                 x += i.size
         out.append((r, sorted(cuts), seen, _stack_ok(t, r, seen)))
     return out
+
+
+def _cut_next(t, c):
+    """Where the code after the cut at cs:c goes on: the next instruction, or for port I/O inside a loop
+    (ball_lost_fade's palette fade, EP2 cs:35AE..35EE: DAC writes, `jne` back to the loop head) the exit of
+    that loop, so the code after the fade (EP2 cs:35F0, the between-balls flag) is a region of its own and
+    not the loop's `pop ax` tail."""
+    i = t.insn(c)
+    nxt = c + i.size
+    if i.mnemonic not in ("in", "out"):
+        return nxt
+    x, exit_ = nxt, None
+    while x < c + 0x60:
+        j = t.insn(x)
+        if j is None:
+            break
+        if (j.mnemonic in JCC or j.mnemonic == "loop") and j.operands[0].type == X.X86_OP_IMM and j.operands[0].imm <= c:
+            exit_ = x + j.size
+        if j.mnemonic in ("jmp", "ret", "retf", "iret", "call", "lcall"):
+            break
+        x += j.size
+    return exit_ if exit_ is not None else nxt
+
+
+def _region_via(regions_by_start, kept, nx, cut_next):
+    """From the region start nx after a cut, the regions the end-of-ball code passes through before the
+    next kept region: straight-line regions (no branch, one cut, no rule writes) such as EP2 cs:385F
+    (`lcall`) between the frame wait cs:385C and the hook cs:3864, or EP9 cs:2F39 (the second
+    dmd_idle_text call) after the frame wait cs:2F36.  Returns (next kept start or None, [cuts passed])."""
+    via, seen = [], set()
+    while nx not in kept:
+        r = regions_by_start.get(nx)
+        if r is None or nx in seen:
+            return None, []
+        seen.add(nx)
+        cuts, straight = r
+        if not straight or len(cuts) != 1:
+            return None, []
+        via.append(cuts[0])
+        nx = cut_next(cuts[0])
+    return nx, via
 
 
 def _stack_ok(t, r, seen):
@@ -2045,6 +2104,7 @@ def auto_hooks(t, handler_ips):
     stmts = _statements(t, cfg["main_loop"], cfg["frame_sync"], exits=(cfg["main_loop"],))
     report["statements"] = len(stmts)
     info = []
+    shows = set()                                    # statements that call dmd_message (EP2 cs:04AB: the timed message)
     for a, b in stmts:
         if any(sa <= a < sb for sa, sb in engine_spans):
             info.append((a, b, "engine", set(), set(), False, 0))
@@ -2054,10 +2114,14 @@ def auto_hooks(t, handler_ips):
         if not ok:
             report["rejected_unliftable"] += 1
         info.append((a, b, "ok" if ok else "bad", W, Rd, keys, n_ins))
+        if ok and _calls_message(t, L0, a, b):
+            shows.add(len(info) - 1)
     blf = cfg.get("ball_lost_fade")
     regions = []
+    by_start = {}                                    # every region: start -> (cuts, straight-line)
     if blf is not None:
         for r0, cuts, seen, stack_ok in _regions(t, L0, blf, _routine_end(t, blf)):
+            by_start[r0] = (cuts, not any(t.insn(x).mnemonic in JCC or t.insn(x).mnemonic in ("loop", "jcxz") for x in seen))
             if not stack_ok:
                 continue
             W, Rd = set(), set()
@@ -2077,7 +2141,7 @@ def auto_hooks(t, handler_ips):
     sel, rsel = set(), set()
     for _ in range(6):                               # fixpoint: writers of what rule code reads are rule code
         for k, (a, b, st, W, Rd, keys, n_ins) in enumerate(info):
-            if st == "ok" and ((W & R) - sound - engine_only):
+            if st == "ok" and (((W & R) - sound - engine_only) or k in shows):
                 sel.add(k)
         for k, reg in enumerate(regions):
             if (reg[3] & R) - sound - engine_only:
@@ -2133,13 +2197,15 @@ def auto_hooks(t, handler_ips):
     kept = {regions[k][0] for k in rsel}
     for k in sorted(rsel):
         r0, cuts, seen, W, Rd = regions[k]
-        cont = {}
+        cont, via = {}, {}
         for c_ in cuts:
-            nx = c_ + t.insn(c_).size
-            if nx in kept:
+            nx, passed = _region_via(by_start, kept, _cut_next(t, c_), lambda c: _cut_next(t, c))
+            if nx is not None:
                 cont[h(c_)] = f"ball_end_{nx:04x}"
+                if passed:
+                    via[h(c_)] = [h(v) for v in passed]
         hooks[f"ball_end_{r0:04x}"] = {"entry": r0, "stops": tuple(cuts), "conf": "auto", "kind": "ball_end",
-                                       "when": "ball_end", "continues": cont,
+                                       "when": "ball_end", "continues": cont, **({"via": via} if via else {}),
                                        "desc": f"automatic: end-of-ball code from cs:{r0:04x} (inside ball_lost_fade cs:{blf:04x}) up to "
                                                "the next display/fade call" + (f"s {', '.join(f'cs:{c:04x}' for c in cuts)}" if cuts else "")}
     report["candidates"] = sorted((v["entry"], v["stops"], k) for k, v in hooks.items())
@@ -2379,6 +2445,7 @@ def build(n, auto=True, drop=()):
     L = Lifter(t)
     handler_ips = sorted(set(int(v, 16) for v in t.col["trigger_table"]["handlers"].values()))
     hooks = {}
+    native_hooks = {}
     if n == 1:
         for name, (entry, stops, desc, conf) in EP1_HOOKS.items():
             hooks[name] = {"entry": entry, "stops": stops, "desc": desc, "conf": conf}
@@ -2395,6 +2462,10 @@ def build(n, auto=True, drop=()):
             for name, hk in sorted(ah.items(), key=lambda kv: kv[1]["entry"]):
                 if name not in drop:
                     hooks[name] = hk
+                elif hk.get("when") == "ball_end":
+                    # an end-of-ball region that does not lift (EP5 cs:1F4A, the demo/tilt/extra-ball tests
+                    # before the bonus): the runtime executes it from the EXE so the chain still starts there
+                    native_hooks[name] = hk
     if t.dispatch_tail is not None:
         hooks["dispatch_tail"] = {"entry": t.dispatch_tail, "stops": (), "conf": "high",
                                   "desc": "shared exit of the sensor dispatcher: runs after every handler that jumps to it, and on "
@@ -2531,7 +2602,7 @@ def build(n, auto=True, drop=()):
         summ, counts = summarize(blocks, entry)
         hook_out[name] = {"entry": entry, "stops": [h(x) for x in hk["stops"]], "desc": hk["desc"], "conf": hk["conf"],
                           "summary": summ, "op_counts": dict(counts)}
-        for k in ("kind", "when", "continues"):          # automatic hooks only (additive keys)
+        for k in ("kind", "when", "continues", "via"):   # automatic hooks only (additive keys)
             if k in hk:
                 hook_out[name][k] = hk[k]
 
@@ -2615,6 +2686,10 @@ def build(n, auto=True, drop=()):
         "sensors": sensors,
         "handlers": handlers,
         "hooks": hook_out,
+        **({"native_hooks": {name: {"entry": h(hk["entry"]), "stops": [h(x) for x in hk["stops"]], "kind": hk["kind"],
+                                    "when": hk["when"], "continues": hk["continues"], **({"via": hk["via"]} if "via" in hk else {}),
+                                    "desc": hk["desc"] + "; not lifted (an instruction the lifter has no op for): run from the EXE"}
+                             for name, hk in sorted(native_hooks.items())}} if native_hooks else {}),
         "blocks": blocks,
         "coverage": {"ops": dict(cov), "total": total, "semantic": total - generic - unexpressed, "state_updates": state,
                      "low_level": lowlevel, "generic": generic, "unexpressed": unexpressed, "unsupported": dict(L.unsupported),

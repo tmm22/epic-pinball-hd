@@ -103,6 +103,8 @@ from that file when it is present, otherwise the contract defaults are used):
   N steps. In the real game that phase depends on machine load.
 * Extensions for testing beyond the contract: `"balls": [...]` for slots 1-4, input bits
   8/16/32 (nudge Z, nudge /, Space) and `--state` (all ball slots and counters in `extra`).
+  Demo mode: `"pokes": {"demo_mode": 1}`, and `"start": "boot"` (full mode: the first main-loop
+  arrival after the table's own boot, no `ball`; docs/enhanced/attract.md).
 
 ### Headless snapshot (no window)
 
@@ -179,6 +181,8 @@ Missing or malformed files produce an error that names the exact file.
 | F | cycle the upscale filter (nearest, smooth, xbrz, crt) |
 | A | pixel aspect: square or VGA (1.2x tall pixels, 4:3) |
 | E | classic or enhanced physics |
+| F12 / Shift-Cmd-S | save a screenshot (PNG, ~/Pictures/Epic Pinball HD by default) |
+| F10 | performance overlay (FPS, frame time, flipper latency) |
 | Esc | menu: resume, new game, settings, choose table, quit (after game over: initials, high scores) |
 | Cmd-Q | quit |
 
@@ -359,10 +363,17 @@ the same code signatures, `StripSpec.scan`):
 rounding):
 * EP1 at game start with the plunger held 1 frame, `--lamps rest` and the message at file
   offset 0x873 (`--message 0x873:0x1:0x12c0`): **0 of 76,800 pixels differ**.
-* EP1 driven by the lifted rules, 400 frames: the whole screen including the two-line hint
-  (dmd_message + draw_text) equals capture frame 600, **0 pixels differ**.
-* EP10: the strip (idle text, score dots, colours) is exact; its start-of-game message (file 0x11DC) is placed
-  exactly (109 of its dots carry a second colour from the message effect, not modelled). EP4:
+* EP1 with the rules (either backend) and no keys, `--frames 340 / 400 / 460 --size 320x240`: the whole
+  screen including the two-line hint (dmd_message + draw_text) equals capture frames 540 / 600 / 660
+  (the 640x480 capture taken at 320x240), **0 of 76,800 pixels differ** (re-run 2026-10-02). `--frames`
+  counts frames from the first main-loop arrival; the capture starts before the EXE, and the table's
+  boot (17 fade-in frames, 177 intro-scroll frames) is in between, so capture frame = frame + 200 (an
+  offset found by matching, not derived). The match needs the boot fade-in's working palette
+  (docs/enhanced/presentation.md section 3): with the fade overrides left out, frame 400 differs in
+  9,713 pixels (the fade-in's darker colours). The DOSBox run types keys from about 12 s on
+  (`AUTOTYPE -w 12`), so later frames show other hints and are not compared.
+* EP10: the strip (idle text, score dots, colours) is exact; its start-of-game message (file 0x11DC, effect 7 colour
+  cycling) is exact including the dots in the second colour (docs/enhanced/presentation.md). EP4:
   window and strip match apart from a two-line hint the snapshot did not request. EP8: lamps
   34/35/50/51 "a" reproduce the level-1 screen; exact colours cannot be compared because EP8
   cycles part of its palette at runtime (a rules/engine-side `paletteOverrides` job).
@@ -451,16 +462,27 @@ The older `scratch/port/run_all.sh` and `diff_traces.py` from the port track sti
 
 ## Known limitations
 
-- EP2-EP13 are checked against the original on ball traces only (the per-frame data-segment check is EP1's), and their
-  boot starts from the EXE image without the intro/boot tail (attract text state, EP8's palette phase).
+- EP2-EP13 are checked against the original on ball traces, and since 2026-10-01 also on every dmd_message call, the
+  message counter and the between-balls flag frame by frame (tools/emu/scenarios/EPn/attract and fidelity); the whole
+  per-frame data-segment check is still EP1's only (on EP2-EP13 some lamp state bytes are known to differ). Their
+  boot runs the boot tail after the intro (intro message, message counter, lamp set-up: `bootTail`) but not the intro
+  scroll loop itself (attract lamp table, EP8's palette phase).
 - Rule code the lift cannot express (EP6 cs:31E1, EP8 cs:3613/0240, EP9 h29c6) runs from the EXE in `MiniX86`; display
   routines inside it are skipped.
-- Demo/attract mode (auto-flip, stuck-ball nudge), the PC-speaker sound path, the F1 parameter editor and the
-  original DOS launcher are not ported (the app has its own launcher).
+- The PC-speaker sound path, the F1 parameter editor and the original DOS launcher are not ported (the app has its
+  own launcher). Demo mode (players 'D': auto-plunge, auto-flip, stuck-ball nudge, demo idle text) is, and the app uses
+  it as attract mode (docs/enhanced/attract.md); only EP1's original demo plunges, so the app adds the plunge on
+  EP2-EP13 (`ClassicEngine.attractLaunch`, off in traces).
 - EP12 can award 2,258,632,704 points from sensor C3 (handler cs:27D9) when `[0x34ad]` is 0: the original's
   `mov cx,[0x34ad]` / `loop` adds 100,000 65,536 times (mod 2^32). The port reproduces the original here.
 - Enhanced-version gaps are listed in docs/enhanced/README.md.
-- Presentation: message effects (AL: dots flying off, fades, colour cycling; render_frame cs:3E35-4373) are timed but
-  not animated. EP9-13 message colours come from a DS byte the rules do not report yet (the table's most common value is
-  used). Palette fades are not shown; EP8's palette ring is (PaletteOverride for 0xA0..0xDF). EP8's robot set is not drawn.
+- Presentation: message effects (render_frame cs:3E35-4373, run from the EXE), EP9-13 message colours, the EP1-8
+  in-game palette fades (boot fade-in end state, ball-loss dim, release restore), the visible boot fade-in at every
+  game start and the end-of-game fade-out (all 13 tables; the game waits for the fade-in, the game-over panel does not
+  wait for the fade-out) and EP8's robot set are shown (docs/enhanced/presentation.md); EP2-13 effect sounds are
+  played. Not shown: the boot's intro scroll (the fade-in plays over the starting view, and on EP9-13, whose fade runs
+  during the intro, it adds 34 frames before play), the quit fade-out of the original's quit prompt and of a demo ended
+  by a key (the app's own menu and attract mode leave without it), EP3/EP5's colour lamps (DAC B0h..BFh, lamp_update
+  EP3 cs:3B5A), and EP9-13's draining-ball restore that wraps into the strip and stays there while render_frame skips
+  its plot (ds:0619 > 2; the skip itself changes no dot).
 - The window's manual scroll (Up/Down) is simplified: 4 px per frame while held, back to follow on release.

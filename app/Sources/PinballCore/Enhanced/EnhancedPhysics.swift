@@ -1295,3 +1295,51 @@ public final class EnhancedPhysics: BallPhysics {
     /// Wall field sample at a point (for tests and calibration).
     public func wallSample(level: Int, _ p: SIMD2<Double>) -> FieldSample { walls[level].sample(p.x, p.y) }
 }
+
+// MARK: - Save states (Replay/SimulationSnapshot.swift)
+
+extension EnhancedPhysics {
+    /// Everything the model carries from step to step: bodies, the live distance fields and class
+    /// masks (value types, copied on write), flipper motion, the reflection-map cache and the
+    /// statistics (`stats.substeps` times the flipper kicks). The rest is derived from the table.
+    public struct State {
+        var config: EnhancedPhysicsConfig
+        var stats: Stats
+        var bodies: [Body]
+        var walls: [DistanceField], actives: [DistanceField]
+        var classes: [[UInt8]]
+        var builtGeneration: Int, builtDynState: (Int, Int, Int), builtLUT: [[ClassicEngine.WallClass]]
+        var alphaStart: [Double], alphaEnd: [Double], alphaNow: [Double]
+        var kickMoving: [Bool]
+        var subIndex: Int
+        var classicMaps: [[SIMD4<Double>]], mapParams: [Int16]
+        var stepReport: StepReport
+    }
+
+    public func saveState() -> State {
+        State(config: config, stats: stats, bodies: bodies, walls: walls, actives: actives, classes: classes,
+              builtGeneration: builtGeneration, builtDynState: builtDynState, builtLUT: builtLUT, alphaStart: alphaStart,
+              alphaEnd: alphaEnd, alphaNow: alphaNow, kickMoving: kickMoving, subIndex: subIndex, classicMaps: classicMaps,
+              mapParams: mapParams, stepReport: stepReport)
+    }
+
+    public func restoreState(_ s: State) {
+        config = s.config   // didSet: contact radii
+        stats = s.stats; bodies = s.bodies; walls = s.walls; actives = s.actives; classes = s.classes
+        builtGeneration = s.builtGeneration; builtDynState = s.builtDynState; builtLUT = s.builtLUT
+        alphaStart = s.alphaStart; alphaEnd = s.alphaEnd; alphaNow = s.alphaNow; kickMoving = s.kickMoving
+        subIndex = s.subIndex; classicMaps = s.classicMaps; mapParams = s.mapParams; stepReport = s.stepReport
+        updateRadii()
+    }
+
+    /// Bodies bit for bit (position, velocity, spin, gravity budget) and the kick counters.
+    func digest(into h: inout StateHasher) {
+        h.add(stats.substeps)
+        for b in bodies {
+            h.add(b.active); h.add(b.layer)
+            for v in [b.c.x, b.c.y, b.v.x, b.v.y, b.spin, b.gravityBudget, b.gravityRate] { h.add(v.bitPattern) }
+            h.add(b.lastSideKick); h.add(b.lastTopKick); h.add(b.stillSteps); h.add(b.searches)
+        }
+        for a in alphaNow { h.add(a.bitPattern) }
+    }
+}

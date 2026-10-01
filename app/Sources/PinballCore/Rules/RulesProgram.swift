@@ -137,6 +137,9 @@ public struct RulesProgram: Sendable {
         public var when: String? = nil
         public var stops: [Int] = []
         public var continues: [Int: String] = [:]
+        /// `ball_end` hooks: the cuts passed on the way to the `continues` hook (straight-line code
+        /// between two display calls, rules.json `via`; optional, older rules.json files have none).
+        public var via: [Int: [Int]] = [:]
     }
     public struct Handler: Sendable { public var name: String; public var entry: Int; public var entryIP: Int; public var colours: [Int] }
     public struct Gate: Sendable {
@@ -205,6 +208,9 @@ public struct RulesProgram: Sendable {
     /// Built by `RulesProgram.discover` for the direct-EXE backend: no blocks, every handler and
     /// hook runs from the EXE (`RulesBackend.direct`).
     public var direct = false
+    /// End-of-ball regions that do not lift (rules.json `native_hooks`, EP5 cs:1F4A): entry ip, stops,
+    /// `continues` and `via` like `hooks`, no graph (`entry` = -1); both backends run them from the EXE.
+    public var nativeHooks: [String: Hook] = [:]
     /// Direct backend: every hook stop (rules.py `Lifter.stops`: lifted code returns there whichever
     /// graph reaches it).
     public var hookStops: Set<Int> = []
@@ -216,6 +222,26 @@ public struct RulesProgram: Sendable {
     /// Direct backend: CS keyboard flags rule code reads as flipper keys (rules.json `["input", ...]`):
     /// cs offset -> 0 left, 1 right.
     public var inputKeys: [Int: Int] = [:]
+    /// Direct backend: the near routines rule code runs as subroutines (rules.py gosubs; the lifted
+    /// program has a block at each of them).
+    public var subs: Set<Int> = []
+    /// Direct backend: the instructions the `ball_end` hooks (and native hooks) cover.
+    public var ballEndCode: Set<Int> = []
+
+    /// Whether a near call to `ip` is a call of rule code (a gosub of the lifted graphs, or one the
+    /// direct discovery found): glue code that calls it runs it from the EXE (EP2 cs:0CAF -> cs:3BAF,
+    /// dmd_idle_text after the plunger release).
+    public func isRuleSubroutine(_ ip: Int) -> Bool {
+        direct ? subs.contains(ip) : labels[String(format: "L%04x", ip)] != nil
+    }
+
+    /// Whether the end-of-ball hooks contain code in `r`. Direct: an address of the ball_end /
+    /// native hook code is in `r`. Lifted: any block of the program starts in `r` (handlers too, so
+    /// this is wider than the hooks; the two agree on the 13 EXEs, where no handler starts inside
+    /// end_of_turn's first 24 bytes).
+    public func ballEndHooksCover(_ r: Range<Int>) -> Bool {
+        direct ? r.contains(where: ballEndCode.contains) : blocks.contains { r.contains($0.ip) }
+    }
 
     /// Address of a named variable (`vars`, then `engine_vars`, then `name.hi` = +2).
     public func address(of name: String) -> Var? {
@@ -544,6 +570,7 @@ private struct Builder {
                 hk.when = hj["when"] as? String
                 hk.stops = (hj["stops"] as? [Any] ?? []).compactMap { Self.int($0) }
                 for (k, v) in hj["continues"] as? [String: Any] ?? [:] { if let a = Self.int(k), let n = v as? String { hk.continues[a] = n } }
+                for (k, v) in hj["via"] as? [String: Any] ?? [:] { if let a = Self.int(k), let l = v as? [Any] { hk.via[a] = l.compactMap { Self.int($0) } } }
             }
             hooks[name] = hk
         }
@@ -591,7 +618,18 @@ private struct Builder {
             if let a = Self.int(k) { stubs[a] = .init(kind: v.first as? String ?? "", far: v.count > 1 ? (v[1] as? Bool ?? false) : false) }
         }
         let lampSlots = (root["lamp_slots"] as? [Any])?.count ?? 0
-        return RulesProgram(
+        var nativeHooks: [String: RulesProgram.Hook] = [:]
+        for (name, hj) in root["native_hooks"] as? [String: [String: Any]] ?? [:] {
+            guard let ip = Self.int(hj["entry"]) else { continue }
+            var hk = RulesProgram.Hook(name: name, entry: -1, entryIP: ip)
+            hk.kind = hj["kind"] as? String
+            hk.when = hj["when"] as? String
+            hk.stops = (hj["stops"] as? [Any] ?? []).compactMap { Self.int($0) }
+            for (k, v) in hj["continues"] as? [String: Any] ?? [:] { if let a = Self.int(k), let n = v as? String { hk.continues[a] = n } }
+            for (k, v) in hj["via"] as? [String: Any] ?? [:] { if let a = Self.int(k), let l = v as? [Any] { hk.via[a] = l.compactMap { Self.int($0) } } }
+            nativeHooks[name] = hk
+        }
+        var program = RulesProgram(
             table: table, exe: root["exe"] as? String ?? "EP\(table).EXE", annotated: root["annotated"] as? Bool ?? false,
             codeSegment: Self.int(source["code_segment"]) ?? 0, dataSegment: Self.int(source["data_segment"]) ?? 0,
             dispatcherIP: Self.int(source["sensor_dispatch"]), sensorTable: Self.int(source["sensor_table"]), dsFileOffset: dsOff, dsSize: dsSize, playerBlock: playerBlock,
@@ -601,5 +639,7 @@ private struct Builder {
             lockoutFreeColours: lockoutFree, gates: gates,
             sweeps: sweeps, messages: messages, messageTables: tables, stubs: stubs, registerNames: registerNames,
             maskedRegisters: masked, nativeBlocks: nativeBlocks)
+        program.nativeHooks = nativeHooks
+        return program
     }
 }

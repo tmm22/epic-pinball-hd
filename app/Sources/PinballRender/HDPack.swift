@@ -12,8 +12,8 @@ public struct RGBAImage: Sendable, Equatable {
 /// A high-resolution asset pack for one table (format: docs/enhanced/rendering.md).
 ///
 /// Packs are generated on the user's machine from the user's own extracted data
-/// (`tools/hdpack/make_pack.py`) and live only in user data directories. Every asset is an
-/// exact integer multiple (`scale`) of the original record and is placed at the original
+/// (`PinballImport.HDPackMaker` in the app, or `tools/hdpack/make_pack.py`) and live only in user
+/// data directories. Every asset is an exact integer multiple (`scale`) of the original record and is placed at the original
 /// position times `scale`, so HD pixel (X, Y) always belongs to original pixel
 /// (X / scale, Y / scale). Collision never looks at the pack.
 public struct HDPack: Sendable {
@@ -44,8 +44,12 @@ public struct HDPack: Sendable {
         }
     }
 
+    /// Replaces `userPacksRoot` (the app's `--support-dir`: `<dir>/HDPacks`). Set once at start-up.
+    nonisolated(unsafe) public static var userPacksRootOverride: URL?
+
     /// Default per-user location of packs in the app: ~/Library/Application Support/EpicPinballHD/HDPacks/EPn
     public static var userPacksRoot: URL {
+        if let o = userPacksRootOverride { return o }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("EpicPinballHD/HDPacks", isDirectory: true)
     }

@@ -17,6 +17,12 @@ Scenario (see tools/emu/trace_schema.json, "scenario"):
    "players", "balls_per_game": game options as DS bytes (optional)
    "params": {"gravity": 4, ...} or [10 values / null],                      (optional)
    "on_drain": "stop" | "continue",                                          (optional, default "stop")
+   "pokes": {"demo_mode": 1, ...}   DS bytes by ds_vars name; demo_mode = PINBALL.EXE's players 'D':
+                                    the table plays itself, and no keys are poked (any key would end
+                                    the demo; the demo writes the flipper flags itself)  (optional)
+   "start": "boot"                  start at the first main-loop arrival after the boot (no warm-up, no
+                                    `ball`; with pokes.demo_mode the command line has players 'D').
+                                    Full mode only (optional)
    "mode": "physics" | "rules" | "full"}                                     (optional, default "physics")
 
 Output: one JSON object per physics step (3 per frame), in execution order.
@@ -36,10 +42,22 @@ WARMUP_STEPS = 12   # flippers start at angle 2 with no outline drawn; 7 steps b
 
 
 _BASE = {}   # table -> (emu, snapshot after boot + warm-up); reused within one process
+LAST = None  # the emulator of the last setup() (a "start": "boot" run has its own, outside _BASE)
 
 
 def setup(scn, mode=None):
     table = scn.get('table', 1)
+    if scn.get('start') == 'boot':
+        # The first arrival at the main loop after the table's own boot, with the command line
+        # PINBALL.EXE builds (players 'D' for demo mode): no warm-up, no injected ball (full mode).
+        demo = bool(scn.get('pokes', {}).get('demo_mode'))
+        emu = ep_emu.EpEmu(table=table, players='D' if demo else str(scn.get('players') or 1))
+        for off, v, w in scn.get('ds_pokes', []):
+            off = int(off, 16) if isinstance(off, str) else int(off)
+            (emu.ww if int(w) == 2 else emu.wb)(emu.ds, off, int(v))
+        global LAST
+        LAST = emu
+        return emu
     if table in _BASE:
         emu, snap = _BASE[table]
         emu.restore(snap)
@@ -93,11 +111,50 @@ def run(scn, mode=None, frames=None, sensor_log=None, frame_state=None):
     inputs = scn.get('inputs', [])
     emu = setup(scn, mode)
     drain_y = emu.A.get('drain_y', DRAIN_Y)
+    demo = bool(scn.get('pokes', {}).get('demo_mode'))
     out = []
+    watch = (scn.get('watch') or {}) if mode != 'physics' else {}   # the port records it only with rules
+    watch_ds = [(int(e[0], 16) if isinstance(e[0], str) else int(e[0]), int(e[1]) if len(e) > 1 else 1)
+                for e in watch.get('ds', [])]
+    calls, hook = [], None
+    if watch.get('messages'):
+        # every dmd_message call (BX = string DS offset, AX, DI), as the port's `--trace` records them
+        from unicorn import UC_HOOK_CODE
+        from unicorn.x86_const import UC_X86_REG_AX, UC_X86_REG_BX, UC_X86_REG_DI
+        ip = message_entry(scn.get('table', 1))
+        hook = emu.uc.hook_add(UC_HOOK_CODE, lambda uc, a, s_, _: calls.append(
+            [uc.reg_read(UC_X86_REG_BX), uc.reg_read(UC_X86_REG_AX), uc.reg_read(UC_X86_REG_DI)]),
+            None, emu.lin(emu.cs, ip), emu.lin(emu.cs, ip))
+    try:
+        return _run_frames(emu, mode, frames, on_drain, inputs, drain_y, demo, out, sensor_log, frame_state,
+                           watch_ds, watch.get('messages'), calls)
+    finally:
+        if hook is not None:
+            emu.uc.hook_del(hook)
+
+
+def message_entry(table):
+    """dmd_message's entry (cs offset) from the table's rules.json `stub_routines` (rules.py output)."""
+    r = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'extracted', 'tables',
+                                    f'EP{table}', 'rules.json')))
+    ms = [int(k, 16) for k, v in r['stub_routines'].items() if v[0] == 'message']
+    if len(ms) != 1:
+        raise ep_emu.EmuError(f'EP{table}: rules.json has {len(ms)} message routines')
+    return ms[0]
+
+
+def _watched(emu, o, w):
+    lo = emu.rw(emu.ds, o, signed=False) if w >= 2 else emu.rb(emu.ds, o)
+    return lo | emu.rw(emu.ds, o + 2, signed=False) << 16 if w == 4 else lo
+
+
+def _run_frames(emu, mode, frames, on_drain, inputs, drain_y, demo, out, sensor_log, frame_state,
+                watch_ds, watch_msgs, calls):
     for f in range(frames):
         if on_drain == 'stop' and emu.dsw('ball_y') >= drain_y:
             break
-        emu.set_keys(inputs[f] if f < len(inputs) else 0)
+        if not demo:
+            emu.set_keys(inputs[f] if f < len(inputs) else 0)
         emu.sensor_log = []
         if mode == 'full':
             try:
@@ -150,7 +207,14 @@ def run(scn, mode=None, frames=None, sensor_log=None, frame_state=None):
                     plunger_charge=emu.dsw('plunger_charge') if emu.has('plunger_charge') else 0,
                 ),
             )
+            if s == 2 and watch_ds:
+                rec['extra']['watch_ds'] = [_watched(emu, o, w) for o, w in watch_ds]
+            if s == 2 and watch_msgs:
+                rec['extra']['messages'] = calls[:]
+                calls.clear()
             out.append(rec)
+        if mode == 'full':
+            emu.post_frame()   # EP9-EP13: render_frame after the steps (cs:1238); its calls count for the next frame
     if not emu.code_intact():
         raise ep_emu.EmuError('the game code segment was overwritten during the run; trace is invalid')
     return out

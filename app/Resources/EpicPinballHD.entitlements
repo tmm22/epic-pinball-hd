@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for the hardened runtime (tools/package_app.sh with DEVELOPER_ID set, or HARDENED=1).
+
+  Deliberately empty: nothing the app does at run time needs a hardened-runtime exception.
+  * Metal shaders are compiled at run time (MTLDevice.makeLibrary(source:)) by the system's
+    out-of-process Metal compiler; the app maps no writable+executable memory, so no
+    com.apple.security.cs.allow-jit / allow-unsigned-executable-memory.
+  * libopenmpt and its dependencies are embedded in Contents/Frameworks and signed with the same
+    identity as the app, so library validation passes (no disable-library-validation).
+  * The app is not sandboxed (no com.apple.security.app-sandbox): reading the CD image or game
+    folder the user picks, and writing ~/Library/Application Support/EpicPinballHD, need no
+    entitlement. Game controllers (GameController framework) and audio output need none either.
+  * No get-task-allow (notarization rejects it) and no DYLD_* environment variables.
+  See docs/enhanced/frontend.md "Packaging" for how this was checked.
+-->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

@@ -9,6 +9,10 @@ import PinballImport
 enum AppPaths {
     /// `--support-dir`: replaces the Application Support root (tests, screenshots).
     nonisolated(unsafe) static var overrideRoot: URL?
+    /// Window frames and full-screen state are kept in the user defaults (AppKit frame autosave)
+    /// only for the real support root: a `--support-dir` run (tests, smoke runs) neither reads nor
+    /// writes them, so it cannot change the user's saved window positions.
+    static var remembersWindows: Bool { overrideRoot == nil }
 
     static var supportRoot: URL {
         if let o = overrideRoot { return o }
@@ -17,6 +21,15 @@ enum AppPaths {
     }
     static var settingsFile: URL { supportRoot.appendingPathComponent("settings.json") }
     static var highScoresFile: URL { supportRoot.appendingPathComponent("highscores.json") }
+    static var statsFile: URL { supportRoot.appendingPathComponent("stats.json") }
+    /// Where the screenshot key saves when no folder is chosen: ~/Pictures/Epic Pinball HD.
+    static var defaultScreenshotFolder: URL {
+        let pics = FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Pictures", isDirectory: true)
+        return pics.appendingPathComponent("Epic Pinball HD", isDirectory: true)
+    }
+    /// Generated HD packs, `HDPacks/EPn` (HDPack.locate's per-user root).
+    static var hdPacksRoot: URL { supportRoot.appendingPathComponent("HDPacks", isDirectory: true) }
     /// `--library`: replaces the imported library's location only (settings and high scores stay
     /// in `supportRoot`).
     nonisolated(unsafe) static var libraryOverride: URL?
@@ -56,12 +69,32 @@ struct FrontEndSettings: Codable, Equatable, Sendable {
     var ballsPerGame = 3
     var lastTable = 1
     var showStrip = true
+    /// Open the pause menu when the window loses focus, the app is deactivated or a game
+    /// controller disconnects mid-game.
+    var pauseWhenInactive = true
+    /// Screenshot key target; empty = `AppPaths.defaultScreenshotFolder`.
+    var screenshotFolder = ""
+    /// FPS / frame time / input latency overlay over the running table.
+    var showPerfOverlay = false
+    /// Attract mode: a table left idle before a game starts (and the launcher, after the same idle
+    /// time) plays itself with the original's demo code; any key leaves it. On by default, as in
+    /// the original (PINBALL.EXE runs its demo after 900 idle menu frames).
+    var attractMode = true
 
     init() {}
 
     enum CodingKeys: String, CodingKey {
         case keyBindings, controllerEnabled, haptics, startFullscreen, pixelAspect, masterVolume
         case players, ballsPerGame, lastTable, showStrip
+        case pauseWhenInactive, screenshotFolder, showPerfOverlay
+        case attractMode
+    }
+
+    /// The folder screenshots go to (`screenshotFolder`, `~` expanded, or the default).
+    var screenshotDirectory: URL {
+        let p = screenshotFolder.trimmingCharacters(in: .whitespaces)
+        if p.isEmpty { return AppPaths.defaultScreenshotFolder }
+        return URL(fileURLWithPath: (p as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
     }
 
     init(from decoder: Decoder) throws {
@@ -78,6 +111,10 @@ struct FrontEndSettings: Codable, Equatable, Sendable {
         ballsPerGame = min(max(get(.ballsPerGame, d.ballsPerGame), 1), 9)
         lastTable = min(max(get(.lastTable, d.lastTable), 1), TableGeometry.tableCount)
         showStrip = get(.showStrip, d.showStrip)
+        pauseWhenInactive = get(.pauseWhenInactive, d.pauseWhenInactive)
+        screenshotFolder = get(.screenshotFolder, d.screenshotFolder)
+        showPerfOverlay = get(.showPerfOverlay, d.showPerfOverlay)
+        attractMode = get(.attractMode, d.attractMode)
     }
 }
 
@@ -184,6 +221,41 @@ extension GameSettings.UpscaleFilter {
         case .smooth: return "Smooth"
         case .xbrz: return "xBRZ-style edges"
         case .crt: return "CRT scanlines"
+        }
+    }
+}
+
+extension GameSettings.LightingStrength {
+    var label: String { self == .subtle ? "Subtle" : "Vivid" }
+}
+
+extension GameSettings.OutputScaling {
+    var label: String {
+        switch self {
+        case .auto: return "Automatic"
+        case .integer: return "Whole multiples (sharpest)"
+        case .fill: return "Fill the window"
+        }
+    }
+}
+
+extension GameSettings.AudioInterpolation {
+    var label: String { self == .original ? "Original (sharp)" : "Smooth" }
+}
+
+extension EnhancedPhysicsConfig.Preset {
+    var label: String { self == .classicFeel ? "Classic feel" : "Modern" }
+}
+
+extension GameSettings {
+    /// Dynamic lighting as one choice: off, or on at a strength. Setting it keeps
+    /// `dynamicLighting` (the on/off field older settings files have) in step.
+    enum LightingChoice: String, CaseIterable { case off, subtle, vivid }
+    var lightingChoice: LightingChoice {
+        get { !dynamicLighting ? .off : lightingStrength == .vivid ? .vivid : .subtle }
+        set {
+            dynamicLighting = newValue != .off
+            if newValue != .off { lightingStrength = newValue == .vivid ? .vivid : .subtle }
         }
     }
 }

@@ -86,9 +86,19 @@ public struct AutoPlayReport: Sendable, Codable {
 
 public enum AutoPlay {
     /// Starts a game on `engine` (full rules when attached) and plays `frames` frames with the
-    /// `AutoPlayer`. Stops early at game over.
-    public static func run(engine e: ClassicEngine, frames: Int, options: RulesOptions = RulesOptions()) -> AutoPlayReport {
-        let sim = GameSimulation(engine: e, options: options)
+    /// `AutoPlayer`. Stops early at game over. `physics` (nil = whatever model is installed on `e`)
+    /// installs that physics after the start, as the app does; `recording` receives the game as a
+    /// replay (Replay/Replay.swift).
+    public static func run(engine e: ClassicEngine, frames: Int, options: RulesOptions = RulesOptions(),
+                           physics: GameSettings.PhysicsMode? = nil, recording: ((Replay) -> Void)? = nil) -> AutoPlayReport {
+        let sim = physics.map { GameSimulation(engine: e, options: options, physics: $0) } ?? GameSimulation(engine: e, options: options)
+        let recorder = recording.map { _ in ReplayRecorder(simulation: sim, options: options) }
+        defer {
+            if let r = recorder, let f = recording {
+                let s = e.takePresentation()
+                f(r.finish(scores: Array(s.scores.prefix(max(1, min(s.playerCount, s.scores.count)))), gameOver: s.gameOver))
+            }
+        }
         var player = AutoPlayer(engine: e)
         var sounds = 0, messages = 0, drains = 0
         var last = PresentationState()

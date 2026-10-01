@@ -46,6 +46,19 @@ final class SettingsPersistenceTests: XCTestCase {
         XCTAssertEqual(StoredSettings.decode(Data("not json".utf8)), StoredSettings())
     }
 
+    /// Attract mode is on by default (as in the original); an older settings.json without the field
+    /// keeps that default, and an explicit false survives a round trip.
+    func testAttractModeSetting() throws {
+        XCTAssertTrue(FrontEndSettings().attractMode)
+        let old = #"{"version":1,"game":{},"frontEnd":{"players":2,"showStrip":false}}"#
+        XCTAssertTrue(StoredSettings.decode(Data(old.utf8)).frontEnd.attractMode)
+        XCTAssertEqual(StoredSettings.decode(Data(old.utf8)).frontEnd.players, 2)
+        var s = StoredSettings()
+        s.frontEnd.attractMode = false
+        XCTAssertFalse(StoredSettings.decode(try s.encoded()).frontEnd.attractMode)
+        XCTAssertTrue(StoredSettings.decode(Data(#"{"frontEnd":{"attractMode":"no"}}"#.utf8)).frontEnd.attractMode)
+    }
+
     func testClampsOutOfRange() {
         let json = #"{"frontEnd":{"players":9,"masterVolume":3,"lastTable":99}}"#
         let s = StoredSettings.decode(Data(json.utf8))

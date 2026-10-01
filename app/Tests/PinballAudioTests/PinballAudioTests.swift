@@ -189,6 +189,30 @@ final class MixerTests: XCTestCase {
         XCTAssertEqual(centre.right[10], 0.5, accuracy: 1e-6)
     }
 
+    /// Settings > Audio switches resampling on a running mixer: nearest neighbour (the driver's)
+    /// repeats source samples, smooth puts linear in-between values.
+    func testInterpolationSwitchesLive() throws {
+        let bank = try SfxBank(data: makeBank([(0..<400).map { $0 % 2 == 0 ? 0 : 100 }]))
+        let r = OfflineAudioRenderer(bank: bank, sampleRate: rate, options: unity)
+        let mixer = r.makeMixer()
+        XCTAssertEqual(mixer.interpolation, .original)
+        func levels() -> Set<Int> {
+            mixer.apply(.stopSfx)
+            mixer.apply(.sfx(SfxCommand(sample: 0, rateHz: 12000).raw))
+            var l = [Float](repeating: 0, count: 256), rr = l
+            l.withUnsafeMutableBufferPointer { lp in rr.withUnsafeMutableBufferPointer { rp in
+                mixer.render(frames: 256, left: lp.baseAddress!, right: rp.baseAddress!)
+            } }
+            return Set(l.map { Int(($0 * 128).rounded()) })
+        }
+        XCTAssertEqual(levels(), [0, 100])
+        mixer.apply(.interpolation(smooth: true))
+        XCTAssertEqual(mixer.interpolation, .smooth)
+        XCTAssertGreaterThan(levels().count, 4, "linear interpolation gives in-between levels")
+        mixer.apply(.interpolation(smooth: false))
+        XCTAssertEqual(levels(), [0, 100])
+    }
+
     func testEventTimingFollowsFrames() throws {
         let bank = try SfxBank(data: makeBank([[Int8](repeating: 64, count: 100)]))
         let r = OfflineAudioRenderer(bank: bank, sampleRate: rate, options: unity)

@@ -1,0 +1,20 @@
+{
+ "name": "attract_drop_left",
+ "table": 12,
+ "frames": 1200,
+ "ball": {
+  "x": 102,
+  "y": 322,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0
+ },
+ "mode": "full",
+ "on_drain": "continue",
+ "pokes": {
+  "demo_mode": 1
+ },
+ "description": "Demo mode, ball dropped onto the resting left flipper: the auto-flip zone (y >= 350, x 88..138 / 148..193) presses the key for 10 frames; drains are served (on_drain continue).",
+ "inputs": []
+}

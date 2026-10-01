@@ -1,0 +1,26 @@
+{
+ "name": "serve_idle",
+ "table": 9,
+ "ball": {
+  "x": 290,
+  "y": 354,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0
+ },
+ "frames": 900,
+ "inputs": [],
+ "mode": "full",
+ "on_drain": "continue",
+ "watch": {
+  "ds": [
+   [
+    "0x181e",
+    2
+   ]
+  ],
+  "messages": true
+ },
+ "description": "Ball 0 waits at the serve position, no input: the timed message cycle and the message counter."
+}

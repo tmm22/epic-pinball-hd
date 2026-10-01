@@ -10,6 +10,8 @@ struct HighScoreEntry: Codable, Equatable, Sendable {
     var player: Int = 1
     /// "classic" or "enhanced" physics, so the two can be told apart later.
     var physics: String = "classic"
+    /// File name of the game's replay in the Replays directory (Replays.swift), if it was kept.
+    var replay: String? = nil
 }
 
 /// Per-table top-10 lists, persisted as JSON in Application Support

@@ -34,10 +34,16 @@ public struct RenderSettings: Sendable, Equatable {
     public var stripInFullTable = true
     /// Round, anti-aliased message dots (enhanced filters); the nearest filter keeps squares.
     public var roundDots = true
+    /// High refresh with an HD pack: flippers rotate continuously between the game's frames
+    /// (`FlipperArt`) instead of cross-fading them. Falls back to the cross-fade per flipper.
+    public var rotateFlippers = true
     /// CRT look: barrel curvature (0 = flat, 0.03 = subtle), scanline depth 0...1, mask 0...1.
     public var crtCurvature: Float = 0.025
     public var crtScanlines: Float = 0.75
     public var crtMask: Float = 0.18
+    /// Cabinet / portrait display: the finished picture turned clockwise (DisplayTransform).
+    /// Independent of `isClassic`: a rotated classic frame is still the classic passes.
+    public var rotation: GameSettings.DisplayRotation = .none
 
     public init() {}
 
@@ -53,8 +59,18 @@ public struct RenderSettings: Sendable, Equatable {
         self.init()
         filter = UpscaleFilter(g.upscaleFilter)
         useHDPack = g.useHDPack
-        lighting = g.dynamicLighting ? .subtle : .off
+        lighting = !g.dynamicLighting ? .off : g.lightingStrength == .vivid ? .vivid : .subtle
         interpolate = g.highRefresh
+        scaling = Scaling(g.outputScaling)
+        rotation = g.displayRotation
+        // Settings > Display > Enhanced rendering (defaults = the built-in values above).
+        func clamp(_ v: Double, _ r: ClosedRange<Double>) -> Float { v.isFinite ? Float(min(max(v, r.lowerBound), r.upperBound)) : Float(r.lowerBound) }
+        crtScanlines = clamp(g.crtScanlines, GameSettings.crtScanlinesRange)
+        crtCurvature = clamp(g.crtCurvature, GameSettings.crtCurvatureRange)
+        crtMask = clamp(g.crtMask, GameSettings.crtMaskRange)
+        roundDots = g.roundDots
+        stripInFullTable = g.stripInFullTable
+        rotateFlippers = g.rotateFlippers
     }
 
     /// Resolved scaling for a frame (auto -> integer or fill).
@@ -63,7 +79,7 @@ public struct RenderSettings: Sendable, Equatable {
         return filter == .nearest && !hdActive ? .integer : .fill
     }
 
-    /// Developer override from `EPIC_PINBALL_RENDER`, e.g. `filter=xbrz,hd=1,lighting=subtle,interp=1,scaling=fill`
+    /// Developer override from `EPIC_PINBALL_RENDER`, e.g. `filter=xbrz,hd=1,lighting=subtle,interp=1,scaling=fill,rotate=90`
     /// (lets the existing headless snapshot mode show enhanced output).
     public static func fromEnvironment(_ env: [String: String] = ProcessInfo.processInfo.environment) -> RenderSettings? {
         guard let spec = env["EPIC_PINBALL_RENDER"], !spec.isEmpty else { return nil }
@@ -80,7 +96,11 @@ public struct RenderSettings: Sendable, Equatable {
             case "scaling": if let sc = Scaling(rawValue: v) { s.scaling = sc }
             case "strip": s.stripInFullTable = on
             case "dots": s.roundDots = v == "round" || on
+            case "flippers": s.rotateFlippers = v == "rotate" || on
             case "curvature": s.crtCurvature = Float(v) ?? s.crtCurvature
+            case "scanlines": s.crtScanlines = Float(v) ?? s.crtScanlines
+            case "mask": s.crtMask = Float(v) ?? s.crtMask
+            case "rotate", "rotation": if let r = Int(v).flatMap(GameSettings.DisplayRotation.init(rawValue:)) { s.rotation = r }
             default: break
             }
         }
@@ -105,11 +125,34 @@ public extension UpscaleFilter {
     }
 }
 
+public extension RenderSettings.Scaling {
+    init(_ s: GameSettings.OutputScaling) {
+        switch s {
+        case .auto: self = .auto
+        case .integer: self = .integer
+        case .fill: self = .fill
+        }
+    }
+}
+
 /// Motion between the last two simulation frames, filled by the front end once per
-/// display frame (high refresh). The renderer draws ball 0 at `ballPrevious` +
-/// (`ballCurrent` - `ballPrevious`) * `alpha`, and cross-fades flipper frames and eases the
-/// camera over the same interval. Simulation timing is untouched.
+/// display frame (high refresh). The renderer draws each ball at its previous +
+/// (current - previous) * `alpha` (ball 0: `ballPrevious` / `ballCurrent`, the others: `balls`),
+/// and rotates or cross-fades the flippers and eases the camera over the same interval.
+/// Simulation timing is untouched.
 public struct MotionInterpolation: Sendable, Equatable {
+    /// One ball slot's motion over the last frame.
+    public struct BallMotion: Sendable, Equatable {
+        public var slot: Int
+        /// Top-left (sub-pixel) before and after the latest frame; previous nil = just came into play.
+        public var previous: Vec2?
+        public var current: Vec2
+        /// Integer position in the latest frame (where the engine composited its occlusion).
+        public var integer: SIMD2<Int>
+        public init(slot: Int, previous: Vec2?, current: Vec2, integer: SIMD2<Int>) {
+            self.slot = slot; self.previous = previous; self.current = current; self.integer = integer
+        }
+    }
     /// 0 = the previous simulation frame, 1 = the latest (time since the last frame / frame period).
     public var alpha: Double
     /// Ball 0's top-left (sub-pixel: x + acc/128) before and after the latest frame.
@@ -122,20 +165,35 @@ public struct MotionInterpolation: Sendable, Equatable {
     /// Ease the camera between frames (for the original's per-frame camera; turn off when the
     /// front end already moves the camera continuously).
     public var interpolateCamera: Bool
+    /// Slots 1...4 in play (multiball), in slot order.
+    public var balls: [BallMotion]
 
     public init(alpha: Double, ballPrevious: Vec2?, ballCurrent: Vec2?, ballInteger: SIMD2<Int>? = nil,
-                frame: Int, interpolateCamera: Bool = true) {
+                frame: Int, interpolateCamera: Bool = true, balls: [BallMotion] = []) {
         self.alpha = alpha; self.ballPrevious = ballPrevious; self.ballCurrent = ballCurrent
         self.ballInteger = ballInteger; self.frame = frame; self.interpolateCamera = interpolateCamera
+        self.balls = balls
     }
 
     /// From the running simulation (call after `advance(by:)`).
     public init(simulation sim: GameSimulation, interpolateCamera: Bool = true) {
-        let b = sim.engine.balls[0]
+        let e = sim.engine, b = e.balls[0]
+        let extra = sim.currentBalls.enumerated().dropFirst().compactMap { i, p -> BallMotion? in
+            guard let p else { return nil }
+            return BallMotion(slot: i, previous: sim.previousBalls.indices.contains(i) ? sim.previousBalls[i] : nil, current: p,
+                              integer: SIMD2(Int(e.balls[i].x), Int(e.balls[i].y)))
+        }
         self.init(alpha: min(max(sim.accumulator / sim.frameDuration, 0), 1),
                   ballPrevious: sim.previousBall, ballCurrent: sim.currentBall,
-                  ballInteger: SIMD2(Int(b.x), Int(b.y)), frame: sim.engine.frameCount,
-                  interpolateCamera: interpolateCamera)
+                  ballInteger: SIMD2(Int(b.x), Int(b.y)), frame: e.frameCount,
+                  interpolateCamera: interpolateCamera, balls: extra)
+    }
+
+    /// Previous, current and integer position of `slot` (nil if unknown).
+    func motion(slot: Int) -> (previous: Vec2?, current: Vec2?, integer: SIMD2<Int>?)? {
+        if slot == 0 { return (ballPrevious, ballCurrent, ballInteger) }
+        guard let m = balls.first(where: { $0.slot == slot }) else { return nil }
+        return (m.previous, m.current, m.integer)
     }
 }
 
