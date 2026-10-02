@@ -195,6 +195,8 @@ final class EnhancedPipeline {
 
     var hd: HDResources?
     private var hdFailed = false
+    /// `HDPack.installGeneration` at the last lookup: packs written since then are looked for again.
+    private var hdGeneration = HDPack.installGeneration
     private(set) var hdWarnings: [String] = []
 
     static let frameRows = TableGeometry.height + 1
@@ -709,7 +711,14 @@ final class EnhancedPipeline {
         syncOcclusion(c)
         syncBasePalette(f.basePalette)
 
-        // HD pack on/off.
+        // HD pack on/off. Packs written since the last lookup (Settings > Library while this table
+        // runs) clear a "none found" result and replace a pack already in use.
+        if hdGeneration != HDPack.installGeneration {
+            hdGeneration = HDPack.installGeneration
+            hdFailed = false
+            hdWarnings = []
+            if hd != nil { deactivateHD(composer: c) }
+        }
         if st.useHDPack, hd == nil, !hdFailed {
             let dataRoot = r.assetsDirectory.deletingLastPathComponent().deletingLastPathComponent()
             if let dir = HDPack.locate(table: r.tableNumber, dataRoot: dataRoot) {

@@ -403,8 +403,12 @@ writes the same `verify.json`). Entry points:
 * **Settings > Library > HD art packs**: scale 2x / 3x / 4x, all tables or the selected one, "Generate HD packs"
   with a progress bar and Cancel. It runs off the main thread (`AppModel.generateHDPacks`, one table after another;
   the playfield's rows are scaled in parallel) and writes `~/Library/Application Support/EpicPinballHD/HDPacks/EP<n>`
-  (`AppPaths.hdPacksRoot`), the per-user root `HDPack.locate` searches. A table picks up a new pack the next time it
-  is started.
+  (`AppPaths.hdPacksRoot`), the per-user root `HDPack.locate` searches. When the job ends it calls
+  `HDPack.packsChanged()`: a running table that found no pack looks again on its next frame, and one already drawing
+  a pack reloads it (a pack remade at another scale). Without that, a "no HD pack" result stayed until the option
+  was switched off and on. Settings > Display's "HD pack" line is read back from the renderer after the frame that
+  did the lookup (`GameController.reportRenderStatus`), not predicted when the settings change: before, it said
+  "none" for every table, because the lookup only happens in the frame after the settings are applied.
 * **`--make-hd-pack N|all [--scale S] [--hd-method xbrz|nearest] [--verify-hd-pack] [--hd-pack-out DIR]`**, headless,
   from the data root (`--data` / `--library`); default scale 4, default output `<support dir>/HDPacks`.
   `--support-dir DIR` also points `HDPack.userPacksRoot` at `DIR/HDPacks` (`HDPack.userPacksRootOverride`).

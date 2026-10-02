@@ -646,8 +646,10 @@ final class GameController: NSObject, MTKViewDelegate {
     var onReturnToPicker: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onScoresChanged: (() -> Void)?
-    /// Receives the HD pack status after every settings change (Settings > Display).
+    /// Receives the HD pack status (Settings > Display) when it changes: after a settings change
+    /// and after the frame in which the renderer looked for, loaded or dropped a pack.
     var onRenderStatus: ((String) -> Void)?
+    private var lastRenderStatus: String?
     /// Cabinet: the score window drawing this table's strip (set by the app delegate).
     weak var scoreWindow: ScoreWindowController?
     /// The score window's own picture rotation (`GameSettings.scoreWindowRotation`).
@@ -806,9 +808,22 @@ final class GameController: NSObject, MTKViewDelegate {
         audio?.apply(master: fe.masterVolume, music: g.musicVolume, sfx: g.sfxVolume)
         audio?.setInterpolation(g.audioInterpolation)
         if !renderer.hdPackWarnings.isEmpty { for w in renderer.hdPackWarnings { warn("HD pack: \(w)") } }
-        onRenderStatus?(renderer.hdPackActive ? "active for table \(table)"
-                        : !rs.useHDPack ? "off" : "none for table \(table)" + (renderer.hdPackWarnings.first.map { " (\($0))" } ?? ""))
+        reportRenderStatus()
         applyDisplayRate()
+    }
+
+    /// The HD pack lookup happens in the renderer's next frame, so the status is read back from the
+    /// renderer rather than predicted from the settings.
+    private func reportRenderStatus() {
+        let rs = renderer.settings
+        let text: String
+        if renderer.hdPackActive { text = "active for table \(table)" }
+        else if !rs.useHDPack { text = "off" }
+        else if let w = renderer.hdPackWarnings.first { text = "none for table \(table) (\(w))" }
+        else { text = "looking for table \(table)'s pack…" }
+        guard text != lastRenderStatus else { return }
+        lastRenderStatus = text
+        onRenderStatus?(text)
     }
 
     /// Whether the strip is drawn under the playfield: the setting, unless the score window draws it
@@ -1427,6 +1442,7 @@ final class GameController: NSObject, MTKViewDelegate {
             fail("render failed: \(error)")
         }
         frames += 1
+        reportRenderStatus()
         if let p = perf, !p.summary.isEmpty, statusHUD.perf != p.summary { statusHUD.perf = p.summary }
         if let k = perfKey {
             drawable.addPresentedHandler { [weak self] d in
@@ -1479,6 +1495,7 @@ final class GameController: NSObject, MTKViewDelegate {
         let rs = renderer.settings
         print("render: filter \(rs.filter.rawValue), hd pack \(renderer.hdPackActive ? "active" : (rs.useHDPack ? "requested, none found" : "off")), "
               + "lighting \(rs.lighting.rawValue), interpolate \(rs.interpolate), scaling \(rs.scaling.rawValue), full table \(camera.showFullTable)"
+              + ", settings status \"\(lastRenderStatus ?? "none")\""
               + (rs.rotation == .none ? "" : ", rotation \(rs.rotation.rawValue)")
               + (rs.filter == .crt ? String(format: ", crt scanlines %.2f curvature %.3f mask %.2f", rs.crtScanlines, rs.crtCurvature, rs.crtMask) : "")
               + ", round dots \(rs.roundDots), strip in full table \(rs.stripInFullTable), rotate flippers \(rs.rotateFlippers)"
