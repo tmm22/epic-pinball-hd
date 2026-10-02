@@ -31,8 +31,14 @@ extension RulesProgram {
         var hooks: [String: Hook] = [:]
         for (n, x) in h.hooks {
             var hk = Hook(name: n, entry: -1, entryIP: x.entry)
-            hk.kind = x.kind; hk.when = x.when; hk.stops = x.stops; hk.continues = x.continues
+            hk.kind = x.kind; hk.when = x.when; hk.stops = x.stops; hk.continues = x.continues; hk.via = x.via
             hooks[n] = hk
+        }
+        var nativeHooks: [String: Hook] = [:]
+        for (n, x) in h.nativeHooks {
+            var hk = Hook(name: n, entry: -1, entryIP: x.entry)
+            hk.kind = x.kind; hk.when = x.when; hk.stops = x.stops; hk.continues = x.continues; hk.via = x.via
+            nativeHooks[n] = hk
         }
         var handlers: [String: Handler] = [:]
         var colourHandler: [Int: String] = [:]
@@ -54,7 +60,10 @@ extension RulesProgram {
             colourHandler: colourHandler, level1Colours: [], tiltColours: [], lockoutFreeColours: [], gates: [],
             sweeps: [], messages: [:], messageTables: [:], stubs: stubs, registerNames: [], maskedRegisters: [])
         p.direct = true
+        p.nativeHooks = nativeHooks
         p.hookStops = h.stops
+        p.subs = h.subs
+        p.ballEndCode = (h.hooks.values.filter { $0.when == "ball_end" } + h.nativeHooks.values).reduce(into: Set<Int>()) { $0.formUnion($1.code) }
         p.segmentVars = [d.segTop: 0, d.segBottom: 1]
         p.gateRoutines = Set(d.gates.map(\.routine))
         if let l = d.layout.csVars["key_lflip"] { p.inputKeys[l] = 0 }

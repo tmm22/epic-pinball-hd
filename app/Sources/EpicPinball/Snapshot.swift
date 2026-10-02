@@ -43,9 +43,10 @@ enum SnapshotMode {
         renderer.aspect = o.aspect
         // Render flags (--filter, --hd-pack, --lighting, --render) on top of EPIC_PINBALL_RENDER / classic.
         if let s = o.renderSettings(base: renderer.settings) { renderer.settings = s }
+        if let r = o.rotation { renderer.settings.rotation = r }
         var pres: ClassicPresentation?
         if !o.legacyWindow, o.sprites, let p = ClassicPresentation.load(assets: assets, engine: engine.data, dataRoot: dataRoot, originalDir: o.originalDir) {
-            p.setStrip(shown: o.stripShown, immediately: true)
+            p.setStrip(shown: o.stripShown && !o.attract, immediately: true)   // attract: no split line, as in the app
             p.state = flagPresentation(o, p)
             p.directMessage = directMessage(o.message, p, lines: o.messageLines)
             p.paused = o.paused
@@ -54,7 +55,14 @@ enum SnapshotMode {
             pres = p
         }
 
-        let sim = GameSimulation(engine: engine, mode: o.mode, options: o.rulesOptions, physics: o.physics)
+        var ro = o.rulesOptions
+        if o.attract {
+            // --attract: the original's demo (players 'D'), with the app's plunge on EP2-EP13
+            ro.demo = true
+            engine.attractLaunch = true
+        }
+        let sim = GameSimulation(engine: engine, mode: o.mode, options: ro, physics: o.physics)
+        if o.attract && engine.attractLayout == nil { warn("--attract: no demo-mode code found for table \(assets.table)") }
         pres?.camera.snap(maxBallY: ClassicPresentation.maxActiveBallY(engine), cameraMax: pres?.cameraMax ?? 0x12A)
         let useRules = engine.rules != nil && !o.hasPresentationFlags
         func frameDone() {
@@ -133,7 +141,7 @@ enum SnapshotMode {
             if useRules && ran == 0 { p.ingest(sim.takePresentation()) }
             p.apply(to: renderer, scene: scene, engine: engine)
         }
-        let width: Int, height: Int
+        var width: Int, height: Int
         if let size = o.size {
             (width, height) = size
         } else {
@@ -142,9 +150,28 @@ enum SnapshotMode {
             width = TableGeometry.width * o.scale
             height = rows * sy
         }
+        // Rotated without --size: the output is the upright image turned (portrait <-> landscape).
+        let turned = o.size == nil && DisplayTransform(rotation: renderer.settings.rotation, outputWidth: 1, outputHeight: 1).swapsAxes
+        if turned { (width, height) = (height, width) }
         let pixels = try renderer.renderOffscreen(scene: scene, width: width, height: height)
         let url = URL(fileURLWithPath: (o.snapshot! as NSString).expandingTildeInPath).standardizedFileURL
         try PNGWriter.write(rgba: pixels, width: width, height: height, to: url)
+        if let sp = o.scoreSnapshot, let p = pres {
+            // The score window's picture: the strip alone, all of its rows, turned by its own rotation
+            // (--score-rotate; without --score-size a 90 / 270 image is the upright one turned).
+            let rows = p.maxStripRows
+            let sy = o.aspect == .square ? o.scale : Int((Double(o.scale) * o.aspect.heightOverWidth).rounded())
+            let rot = o.scoreRotation ?? .none
+            var (sw, sh) = o.scoreSize ?? (TableGeometry.width * o.scale, rows * sy)
+            if o.scoreSize == nil, DisplayTransform(rotation: rot, outputWidth: 1, outputHeight: 1).swapsAxes { (sw, sh) = (sh, sw) }
+            let px = try renderer.renderStripOffscreen(rows: rows, width: sw, height: sh, rotation: rot)
+            let su = URL(fileURLWithPath: (sp as NSString).expandingTildeInPath).standardizedFileURL
+            try PNGWriter.write(rgba: px, width: sw, height: sh, to: su)
+            let lt = DisplayTransform(rotation: rot, outputWidth: sw, outputHeight: sh)
+            let f = renderer.stripFit(rows: rows, outputWidth: lt.logicalWidth, outputHeight: lt.logicalHeight)
+            print("wrote \(su.path) (score window \(sw)x\(sh), \(rows) strip rows at \(Int(f.x)),\(Int(f.y)) \(Int(f.width))x\(Int(f.height))"
+                  + (rot == .none ? ")" : " upright, rotated \(rot.rawValue))"))
+        }
         let b = engine.balls[0]
         let flips = engine.groups.map { String($0.angle) }.joined(separator: ",")
         if let p = pres {
@@ -152,6 +179,7 @@ enum SnapshotMode {
             print("presentation: graphics from \(c.graphics.source), window \(p.windowRows) rows + strip \(renderer.visibleStripRows(for: scene)) rows, "
                   + "lamps drawn \(p.state.lamps.count), message \(p.currentMessage().map { "\($0.text.count) chars ax=0x\(String($0.ax, radix: 16)) di=\($0.di)" } ?? "none")"
                   + ", filter \(renderer.settings.filter.rawValue)"
+                  + (renderer.settings.rotation == .none ? "" : ", rotated \(renderer.settings.rotation.rawValue)")
                   + (renderer.settings.isClassic ? "" : ", enhanced render (hd pack \(renderer.hdPackActive ? "on" : "off"), lighting \(renderer.settings.lighting.rawValue))"))
             for w in renderer.hdPackWarnings { warn("HD pack: \(w)") }
             if ProcessInfo.processInfo.environment["EPIC_PINBALL_DEBUG_SPEC"] != nil { print("strip spec: \(c.spec)") }

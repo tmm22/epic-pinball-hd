@@ -105,6 +105,40 @@ enum PNGFile {
         ctx.draw(img, in: CGRect(x: 0, y: 0, width: w, height: h))
         return (w, h, buf)
     }
+
+    /// Straight (non-premultiplied) RGBA8 pixels of a PNG as stored, like Pillow's
+    /// `Image.open(p).convert("RGBA")` (the HD pack generator needs the exact values, also under
+    /// partial alpha). 8-bit RGB(A) images are read from the decoded bitmap without colour
+    /// conversion; anything else goes through `read` and is un-premultiplied.
+    static func readStraight(_ url: URL) -> (w: Int, h: Int, rgba: [UInt8])? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let img = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return nil }
+        let w = img.width, h = img.height, bpr = img.bytesPerRow
+        let alpha = img.alphaInfo
+        let order = img.bitmapInfo.intersection(.byteOrderMask)
+        if img.bitsPerComponent == 8, img.colorSpace?.model == .rgb, order.rawValue == 0 || order == .byteOrder32Big,
+           (img.bitsPerPixel == 32 && [.last, .noneSkipLast].contains(alpha)) || (img.bitsPerPixel == 24 && alpha == .none),
+           let data = img.dataProvider?.data as Data?, data.count >= bpr * (h - 1) + w * img.bitsPerPixel / 8 {
+            var out = [UInt8](repeating: 255, count: w * h * 4)
+            let n = img.bitsPerPixel / 8
+            data.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
+                for y in 0..<h {
+                    for x in 0..<w {
+                        let s = y * bpr + x * n, d = (y * w + x) * 4
+                        out[d] = p[s]; out[d + 1] = p[s + 1]; out[d + 2] = p[s + 2]
+                        if alpha == .last { out[d + 3] = p[s + 3] }
+                    }
+                }
+            }
+            return (w, h, out)
+        }
+        guard var r = read(url) else { return nil }
+        for i in stride(from: 0, to: r.rgba.count, by: 4) where r.rgba[i + 3] != 0 && r.rgba[i + 3] != 255 {
+            let a = Double(r.rgba[i + 3]) / 255
+            for c in 0..<3 { r.rgba[i + c] = UInt8(min(255, (Double(r.rgba[i + c]) / a).rounded())) }
+        }
+        return r
+    }
 }
 
 extension Data {

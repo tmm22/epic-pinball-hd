@@ -50,6 +50,17 @@ final class RulesDirectTests: XCTestCase {
             eq("hook \(k) kind", a.kind, b.kind)
             eq("hook \(k) when", a.when, b.when)
             eq("hook \(k) continues", a.continues, b.continues)
+            eq("hook \(k) via", a.via, b.via)
+        }
+        for k in Set(p.nativeHooks.keys).union(q.nativeHooks.keys).sorted() {
+            guard let a = p.nativeHooks[k], let b = q.nativeHooks[k] else {
+                out.append("native hook \(k): direct \(p.nativeHooks[k] == nil ? "-" : "+") lifted \(q.nativeHooks[k] == nil ? "-" : "+")")
+                continue
+            }
+            eq("native hook \(k) entry", a.entryIP, b.entryIP)
+            eq("native hook \(k) stops", a.stops, b.stops)
+            eq("native hook \(k) continues", a.continues, b.continues)
+            eq("native hook \(k) via", a.via, b.via)
         }
         for k in Set(p.stubs.keys).union(q.stubs.keys).sorted() {
             eq("stub \(hex4(k))", p.stubs[k].map { "\($0.kind)/\($0.far)" } ?? "-", q.stubs[k].map { "\($0.kind)/\($0.far)" } ?? "-")
@@ -341,5 +352,30 @@ extension RulesDirectTests {
         }
         if runs == 0 { throw XCTSkip("no user tables with rules.json") }
         print(lines.joined(separator: "\n") + "\nsuite scenarios, lifted vs direct: \(runs) runs, \(frames) frames")
+    }
+}
+
+extension RulesDirectTests {
+    /// The plunger lane's rule fragments (`TableGlue.discoverLane`: serve2, serve1, release, release2)
+    /// are found in every table with a charge plunger and decode (EP1 keeps its hand glue, EP8 has a
+    /// launch block instead); both backends get the same glue. Prints the ranges.
+    func testLaneGlueFound() throws {
+        var lines: [String] = []
+        for n in 1...13 {
+            guard let exe = Self.exe(n) else { continue }
+            let r = try RulesRuntime.direct(exe: exe, table: n)
+            let names = ["serve2", "serve1", "release", "release2", "bootTail", "betweenBalls"]
+            if let q = Self.lifted(n), let eot = r.glue.routines["end_of_turn"] {
+                let covered = q.blocks.contains { $0.ip >= eot && $0.ip < eot + 24 }
+                lines.append("EP\(n): end of turn cs:\(hex4(eot)) in lifted blocks: \(covered)")
+            }
+            lines.append("EP\(n): " + names.map { k in r.glue.range(k).map { "\(k) \(hex4($0.start))..\(hex4($0.end))" } ?? "\(k) -" }
+                .joined(separator: ", "))
+            XCTAssertEqual(r.glue.warnings, [], "EP\(n) glue warnings")
+            if n == 8 { XCTAssertNil(r.glue.range("release2"), "EP8 has no plunger lane"); continue }
+            for k in ["release", "release2"] { XCTAssertNotNil(r.glue.range(k), "EP\(n) \(k)") }
+        }
+        if lines.isEmpty { throw XCTSkip("no original EXEs") }
+        print(lines.joined(separator: "\n"))
     }
 }

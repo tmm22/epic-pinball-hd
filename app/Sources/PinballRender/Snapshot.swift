@@ -10,6 +10,11 @@ public extension PinballRenderer {
     /// Renders one frame into an offscreen texture and returns it as RGBA8 bytes
     /// (row-major, top row first, `width * 4` bytes per row).
     func renderOffscreen(scene: SceneState, width: Int, height: Int) throws -> [UInt8] {
+        try renderOffscreen(width: width, height: height) { cb, target in try encode(scene: scene, into: cb, target: target) }
+    }
+
+    /// Runs `encode` into a fresh RGBA8 target of the given size and reads it back.
+    func renderOffscreen(width: Int, height: Int, encode: (MTLCommandBuffer, MTLTexture) throws -> Void) throws -> [UInt8] {
         let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
         desc.usage = [.renderTarget, .shaderRead]
         desc.storageMode = .private
@@ -19,7 +24,7 @@ public extension PinballRenderer {
               let cb = commandQueue.makeCommandBuffer() else {
             throw RenderError.resourceCreation("snapshot readback buffer")
         }
-        try encode(scene: scene, into: cb, target: target)
+        try encode(cb, target)
         guard let blit = cb.makeBlitCommandEncoder() else { throw RenderError.resourceCreation("blit encoder") }
         blit.copy(from: target, sourceSlice: 0, sourceLevel: 0,
                   sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0), sourceSize: MTLSize(width: width, height: height, depth: 1),

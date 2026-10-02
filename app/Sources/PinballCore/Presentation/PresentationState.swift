@@ -34,8 +34,23 @@ public struct PresentationState: Sendable {
     /// Per lamp slot, which overlay record lamp_update blitted last: 0 = none since boot (the
     /// playfield shows through), 1 = record "a", 2 = record "b" (`RulesRuntime.lampDrawn`).
     public var lampSprites: [UInt8] = []
+    /// Calls of a sprite-set routine this frame, in order (EP8 cs:A42F: the robot figure or its
+    /// background, `SpriteSetRoutine`); the composer blits the chosen records into VRAM.
+    public var spriteSets: [SpriteSetEvent] = []
+    /// The last call of each sprite-set routine since boot, by routine (what VRAM holds: the original never
+    /// redraws it otherwise; a new game boots with the playfield as loaded, so this is empty then). nil = the
+    /// producer does not track it. The composer redraws it after it resets VRAM and after a state load.
+    public var spriteSetsShown: [SpriteSetEvent]? = nil
 
     public init() {}
+}
+
+/// One call of a sprite-set routine: its cs entry and the selector it was called with (AL: 1 = the
+/// "on" set, anything else the "off" set).
+public struct SpriteSetEvent: Sendable, Equatable {
+    public var routine: Int
+    public var selector: Int
+    public init(routine: Int, selector: Int) { self.routine = routine; self.selector = selector }
 }
 
 public struct PaletteOverride: Sendable, Equatable {
@@ -61,6 +76,15 @@ public struct MessageRef: Sendable, Equatable {
     /// EP9-13 dot colour index for this message (set from a DS byte before the call); -1 = unknown,
     /// the renderer uses the table's default.
     public var colour: Int = -1
+    /// Counts dmd_message calls: a new value means the dot list was rewritten (the same text can be
+    /// shown twice in a row). -1 = unknown.
+    public var serial: Int = -1
+    /// render_frame calls since that dmd_message call, the clock of the dot effects (some effects never
+    /// advance the counter, EP1 cs:3F6D). -1 = unknown.
+    public var renderFrames: Int = -1
+    /// render_frame's frame counter after this frame (EP1 ds:0B3D) where the rules keep it exactly
+    /// (EP1's glue), including values other code stores into it; -1 = not known.
+    public var counter: Int = -1
     public init(exeOffset: Int, mode: UInt8, framesRemaining: Int) {
         self.exeOffset = exeOffset; self.mode = mode; self.framesRemaining = framesRemaining
     }
@@ -78,6 +102,10 @@ public struct TextRef: Sendable, Equatable {
     public var bytes: [UInt8]
     /// EP9-13 dot colour index (-1 = unknown), as `MessageRef.colour`.
     public var colour: Int = -1
+    /// `MessageRef.serial` / `renderFrames` of the message when the line was drawn (-1 = unknown): the
+    /// line joins that message's dot list after that many render_frame calls.
+    public var messageSerial: Int = -1
+    public var afterRenders: Int = -1
     public init(exeOffset: Int, dsOffset: Int, position: Int, routine: Int, bytes: [UInt8]) {
         self.exeOffset = exeOffset; self.dsOffset = dsOffset; self.position = position
         self.routine = routine; self.bytes = bytes

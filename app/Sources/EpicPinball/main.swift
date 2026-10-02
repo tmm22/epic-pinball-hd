@@ -1,7 +1,9 @@
 import AppKit
 import Foundation
+import MachO
 import PinballCore
 import PinballImport
+import PinballRender
 
 func fail(_ message: String, code: Int32 = 1) -> Never {
     FileHandle.standardError.write(Data("EpicPinball: \(message)\n".utf8))
@@ -22,8 +24,16 @@ do {
     fail("\(error)", code: 2)
 }
 
+// `--list-dylibs`: every image dyld mapped into this process (tools/package_app.sh checks the
+// embedded libraries with it under the hardened runtime, which ignores DYLD_PRINT_LIBRARIES).
+if options.listDylibs {
+    for i in 0..<_dyld_image_count() { if let n = _dyld_get_image_name(i) { print(String(cString: n)) } }
+    exit(0)
+}
+
 if let d = options.supportDir {
     AppPaths.overrideRoot = URL(fileURLWithPath: (d as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
+    HDPack.userPacksRootOverride = AppPaths.hdPacksRoot
 }
 if let d = options.libraryDir {
     AppPaths.libraryOverride = URL(fileURLWithPath: (d as NSString).expandingTildeInPath, isDirectory: true).standardizedFileURL
@@ -93,7 +103,15 @@ if let src = options.headlessImport {
     }
 }
 
+// `--make-hd-pack N|all`: HD packs without a window (HDPackGeneration.swift).
+if let tables = options.makeHDPack {
+    var o = options
+    let dataRoot = resolveDataRoot(&o)
+    exit(HDPackCLI.run(tables: tables, options: o, dataRoot: dataRoot))
+}
+
 let headless = options.trace != nil || options.snapshot != nil || (options.autoplay != nil && options.snapshot == nil)
+    || options.playReplay != nil
 
 if headless {
     let dataRoot = resolveDataRoot(&options)
@@ -103,6 +121,22 @@ if headless {
             exit(0)
         } catch {
             fail("trace failed: \(error)")
+        }
+    }
+
+    // `--play-replay FILE`: re-simulate a replay on a new engine and compare the final state.
+    if let path = options.playReplay {
+        do {
+            let replay = try Replay.load(contentsOf: URL(fileURLWithPath: (path as NSString).expandingTildeInPath))
+            let check = try ReplayPlayer.verify(replay, dataRoot: dataRoot, originalDir: options.originalURL)
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try enc.encode(check)
+            if let p = options.autoplayJSON { try data.write(to: URL(fileURLWithPath: (p as NSString).expandingTildeInPath)) }
+            FileHandle.standardOutput.write(data + Data("\n".utf8))
+            exit(check.matches ? 0 : 4)
+        } catch {
+            fail("replay \(path): \(error)")
         }
     }
 
@@ -117,8 +151,21 @@ if headless {
     }
 
     if let n = options.autoplay, options.snapshot == nil {
-        if options.physics == .enhanced { _ = EnhancedPhysics.install(on: engine, config: .classicFeel) }
-        let report = AutoPlay.run(engine: engine, frames: n, options: options.rulesOptions)
+        let report: AutoPlayReport
+        if let out = options.recordReplay {
+            // Recorded: the physics model is installed after the start (the app's and the replay's order).
+            var replay: Replay?
+            report = AutoPlay.run(engine: engine, frames: n, options: options.rulesOptions, physics: options.physics) { replay = $0 }
+            guard var r = replay else { fail("no replay recorded") }
+            r.header.appVersion = ReplayLibrary.appVersion
+            r.header.setDigests(dataRoot: dataRoot, originalDir: options.originalURL)
+            let url = URL(fileURLWithPath: (out as NSString).expandingTildeInPath)
+            do { try r.write(to: url) } catch { fail("cannot write \(out): \(error)") }
+            FileHandle.standardError.write(Data("replay: \(url.path), \(r.header.frames) frames, digest \(r.header.finalDigest)\n".utf8))
+        } else {
+            if options.physics == .enhanced { _ = EnhancedPhysics.install(on: engine, config: .classicFeel) }
+            report = AutoPlay.run(engine: engine, frames: n, options: options.rulesOptions)
+        }
         let enc = JSONEncoder()
         enc.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = (try? enc.encode(report)) ?? Data()
@@ -155,7 +202,22 @@ let delegate: AppDelegate = MainActor.assumeIsolated {
         settings.game.fullTableView = options.full
         settings.game.useHDPack = options.hdPack
         settings.game.dynamicLighting = options.lighting.map { $0 != .off } ?? false
+        settings.game.lightingStrength = options.lighting == .vivid ? .vivid : .subtle
+        // Not CLI flags: the defaults, so a direct start does not depend on the stored file.
+        let defaults = GameSettings()
+        settings.game.outputScaling = defaults.outputScaling
+        settings.game.enhancedPreset = defaults.enhancedPreset
+        settings.game.audioInterpolation = defaults.audioInterpolation
+        settings.game.crtScanlines = defaults.crtScanlines
+        settings.game.crtCurvature = defaults.crtCurvature
+        settings.game.crtMask = defaults.crtMask
+        settings.game.roundDots = defaults.roundDots
+        settings.game.stripInFullTable = defaults.stripInFullTable
+        settings.game.rotateFlippers = defaults.rotateFlippers
         settings.game.highRefresh = options.highRefreshFlag
+        settings.game.displayRotation = options.rotation ?? .none
+        settings.game.scoreWindow = options.scoreWindow
+        settings.game.scoreWindowRotation = options.scoreRotation ?? .none
         if let v = options.volume { settings.frontEnd.masterVolume = v }
     }
     let model = AppModel(settings: settings, scores: HighScoreStore())
@@ -183,7 +245,7 @@ let delegate: AppDelegate = MainActor.assumeIsolated {
     }
     if let path = options.uiSnapshot {
         do {
-            try UISnapshot.run(screen: options.uiScreen, model: model, size: options.size, to: path)
+            try UISnapshot.run(screen: options.uiScreen, model: model, size: options.size, to: path, rotation: options.rotation ?? .none)
             exit(0)
         } catch { fail("ui snapshot failed: \(error)") }
     }

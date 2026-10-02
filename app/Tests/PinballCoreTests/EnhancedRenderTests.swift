@@ -121,7 +121,10 @@ final class EnhancedRenderTests: XCTestCase {
         let golden: [String: String] = [
             "EP1 3x": "29b7caa074f3ab4d", "EP1 vga5": "835108d00297f249", "EP1 full2": "a8f3d120c9d4830d",
             "EP8 3x": "6df79c3ad45a9d32", "EP8 vga5": "0f88af3a6121100d", "EP8 full2": "6c3bd5071e111f15",
-            "EP10 3x": "bd31d8274d48f973", "EP10 vga5": "0cdf4affda5d7895", "EP10 full2": "4e933d8365cbeead",
+            // EP10 3x / vga5 re-recorded: strip row 0 is render_frame's clear colour 22h, not the panel's 23h
+            // (EP10 cs:3F07; harness VRAM and DOSBox-X capture, docs/enhanced/presentation.md section 2).
+            // Only those 320 strip pixels changed.
+            "EP10 3x": "098b4e0a9c4efb73", "EP10 vga5": "04154ba33ce25895", "EP10 full2": "4e933d8365cbeead",
         ]
         var ran = 0
         var failures: [String] = []
@@ -212,6 +215,27 @@ final class EnhancedRenderTests: XCTestCase {
         let s = RenderSettings(g)
         XCTAssertEqual(s.filter, .crt); XCTAssertEqual(s.lighting, .subtle); XCTAssertTrue(s.useHDPack); XCTAssertTrue(s.interpolate)
         XCTAssertFalse(s.isClassic)
+    }
+
+    /// Lighting strength and output scaling (Settings > Display): the strength only matters while
+    /// lighting is on; integer scaling of the nearest filter stays on the classic path.
+    func testLightingStrengthAndScalingMapping() {
+        var g = GameSettings()
+        g.lightingStrength = .vivid
+        XCTAssertEqual(RenderSettings(g).lighting, .off)
+        XCTAssertTrue(RenderSettings(g).isClassic)
+        g.dynamicLighting = true
+        XCTAssertEqual(RenderSettings(g).lighting, .vivid)
+        g.lightingStrength = .subtle
+        XCTAssertEqual(RenderSettings(g).lighting, .subtle)
+        g = GameSettings()
+        XCTAssertEqual(RenderSettings(g).scaling, .auto)
+        g.outputScaling = .integer
+        XCTAssertEqual(RenderSettings(g).scaling, .integer)
+        XCTAssertTrue(RenderSettings(g).isClassic)
+        g.outputScaling = .fill
+        XCTAssertEqual(RenderSettings(g).scaling, .fill)
+        XCTAssertFalse(RenderSettings(g).isClassic)
     }
 
     func testFillFitKeepsAspectAndIntegerMatchesClassic() {

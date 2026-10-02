@@ -249,7 +249,7 @@ A flipper that is not moving is an ordinary wall (reflection).
 * Nudge (cs:0DFD): Z/`,`/`/`/Space outside the lane, accepted only when `nudge_timer` = 0.
   Sets `nudge_timer` = 10 frames, `tilt_meter` (ds:5871) += 35, camera shake -10 rows.
   The meter decays by 1 per frame. **meter > 80 means TILT** (`tilted` ds:5872: flippers and kickers off).
-* Stuck ball: if x,y are unchanged for 25 consecutive frames, vx += 1 once. **Demo mode only**: cs:0C48..0C5D skips this when demo_mode (ds:6C5A) != 1 (found by the emulator harness, see emulation.md).
+* Stuck ball: if x,y are unchanged for 25 consecutive frames, vx += 1 once. **Demo mode only**: cs:0C48..0C5D skips this when demo_mode (ds:6C5A) != 1 (found by the emulator harness, see emulation.md). The whole demo block (auto-plunge cs:0B44/0B79, auto-flip and this nudge cs:0C48, key test cs:0CFF) is in docs/enhanced/attract.md.
 * Plunger lane: while the ball is in the lane (layer 0, x>=0x118, y>=0xDC, serve delay 0) and the plunger is not held, vx is forced to 0 every frame (cs:0B83).
 * Boot: both flippers start at angle 2, not rest, and fall to rest over the first steps; the first flipper_update erases a never-drawn angle-2 outline (removes 4 wall pixels in EP1).
 * Push-out loop (cs:1826..18FA) has no iteration cap and runs inside the timer ISR with interrupts off: a fast ball straddling 1-px wall art can hang the original game. The port caps it (10,000 iterations).

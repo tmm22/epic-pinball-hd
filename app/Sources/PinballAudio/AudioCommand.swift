@@ -52,6 +52,8 @@ enum AudioCommand: Sendable {
     case music(song: Int32, order: Int32)
     case pauseMusic(Bool)
     case volumes(master: Float, sfx: Float, music: Float)
+    /// Resampling: nearest neighbour (false, the original) or smooth.
+    case interpolation(smooth: Bool)
 }
 
 extension SfxCommand {

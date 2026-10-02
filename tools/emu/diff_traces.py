@@ -343,7 +343,9 @@ def main():
             res, lines = diff_one(a, b, use_extra, args.context, orig_error)
             res.update(name=name, mode=eff_mode, table=s.get('table', 1))
             if res['status'] == 'DIVERGES' and eff_mode != 'physics':
-                why = explain_rules(res, a, sensor_log, run_scenario._BASE[s.get('table', 1)][0], frame_state,
+                t = s.get('table', 1)
+                why = explain_rules(res, a, sensor_log, run_scenario._BASE[t][0] if t in run_scenario._BASE else run_scenario.LAST,
+                                    frame_state,
                                     table=s.get('table', 1))
                 if why:
                     res.update(status='RULES_GAP', explanation=why)

@@ -1,0 +1,30 @@
+{
+ "name": "nodemo_drop_left",
+ "table": 2,
+ "ball": {
+  "x": 96,
+  "y": 333,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0
+ },
+ "frames": 1200,
+ "inputs": [],
+ "mode": "full",
+ "on_drain": "continue",
+ "watch": {
+  "ds": [
+   [
+    "0x0713",
+    1
+   ],
+   [
+    "0x0a22",
+    2
+   ]
+  ],
+  "messages": true
+ },
+ "description": "Ball 0 dropped onto the resting left flipper; drains are served (on_drain continue): ball-end chain, between-balls display, messages and counter."
+}

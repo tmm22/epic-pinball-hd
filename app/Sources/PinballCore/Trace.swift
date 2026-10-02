@@ -31,13 +31,15 @@ public enum EngineAssets {
     /// The classic engine for `table`. With `rules` (default) the table's lifted rules
     /// (rules.json + the user's EPn.EXE) are attached, inactive (`rulesMode = .off`) until a
     /// scenario or `ClassicEngine.startGame` enables them; if they cannot be loaded the engine runs
-    /// physics only and `rulesLoadError` says why.
-    public static func makeEngine(dataRoot: URL, table: Int, rules: Bool = true, originalDir: URL? = nil) throws -> ClassicEngine {
+    /// physics only and `rulesLoadError` says why. `backend` (default `RulesBackend.default`) picks
+    /// the rules implementation (a replay asks for the one it was recorded with).
+    public static func makeEngine(dataRoot: URL, table: Int, rules: Bool = true, originalDir: URL? = nil,
+                                  backend: RulesBackend = .default) throws -> ClassicEngine {
         let (d, buf) = try load(dataRoot: dataRoot, table: table)
         let e = try ClassicEngine(data: d, startBuffer: buf)
         if rules {
             do {
-                let r = try RulesRuntime.load(dataRoot: dataRoot, table: table, originalDir: originalDir)
+                let r = try RulesRuntime.load(dataRoot: dataRoot, table: table, originalDir: originalDir, backend: backend)
                 r.attach(to: e, mode: .off)
             } catch {
                 e.rulesLoadError = String(describing: error)
@@ -92,6 +94,17 @@ public struct Scenario: Sendable {
     /// defaults are 1 player and 3 balls.
     public var players: Int?
     public var ballsPerGame: Int?
+    /// Port extension: `"start": "boot"` starts at the first main-loop arrival after the table's own
+    /// boot (power-on flippers at their boot angle, the EXE's ball slots, the rules boot with the
+    /// harness's options; `pokes.demo_mode` = players 'D'), as `EpEmu(players=...)` does, instead of
+    /// the warmed-up scenario state; `ball` is then optional and ignored. Full mode only.
+    public var startAtBoot = false
+    /// Port extension for rules tests (`"watch": {"ds": [[offset, width], ...], "messages": true}`):
+    /// the last record of every frame gets `extra.watch_ds` (those DS values after the frame) and
+    /// `extra.messages` (that frame's dmd_message calls as [string DS offset, AX, DI]), as
+    /// tools/emu/run_scenario.py records them for the original. Needs rules (rules or full mode).
+    public var watchDS: [(Int, Int)] = []
+    public var watchMessages = false
 
     /// engine.json / export names; the trace schema's names are accepted as aliases.
     public static let paramNames = ["rest_div_x", "rest_div_y", "kicker", "flip_top_x", "flip_top_y",
@@ -111,7 +124,10 @@ public struct Scenario: Sendable {
         guard let table = int(root["table"]), (1...TableGeometry.tableCount).contains(table) else {
             throw ScenarioError.invalid("'table' must be 1...13")
         }
-        guard let b = root["ball"] as? [String: Any], let x = int(b["x"]), let y = int(b["y"]) else {
+        let boot = root["start"] as? String == "boot"
+        guard root["start"] == nil || boot else { throw ScenarioError.invalid("start must be \"boot\"") }
+        let b = root["ball"] as? [String: Any] ?? [:]
+        guard let x = int(b["x"]) ?? (boot ? 0 : nil), let y = int(b["y"]) ?? (boot ? 0 : nil) else {
             throw ScenarioError.invalid("'ball' needs at least x and y")
         }
         let ball = Ball(x: x, y: y, xf: int(b["xf"]) ?? 0, yf: int(b["yf"]) ?? 0,
@@ -162,6 +178,17 @@ public struct Scenario: Sendable {
             guard [1, 2, 4].contains(w), (0..<0x10000).contains(a) else { throw ScenarioError.invalid("bad ds_pokes entry") }
             sc.dsPokes.append((a, v, w))
         }
+        sc.startAtBoot = boot
+        if let w = root["watch"] as? [String: Any] {
+            for p in w["ds"] as? [[Any]] ?? [] {
+                guard let a = int(p.first), (0..<0x10000).contains(a) else { throw ScenarioError.invalid("bad watch.ds entry") }
+                let wd = p.count > 1 ? (int(p[1]) ?? 1) : 1
+                guard [1, 2, 4].contains(wd) else { throw ScenarioError.invalid("bad watch.ds entry") }
+                sc.watchDS.append((a, wd))
+            }
+            sc.watchMessages = w["messages"] as? Bool ?? false
+        }
+        if boot && mode != "full" { throw ScenarioError.invalid("start \"boot\" needs mode full") }
         sc.players = int(root["players"])
         sc.ballsPerGame = int(root["balls_per_game"])
         if let bs = root["balls"] as? [[String: Any]] {
@@ -183,7 +210,7 @@ public struct Scenario: Sendable {
     /// DS variables a scenario may poke (names as in tools/emu/ep_emu.py).
     public static let pokeNames = ["nudge_timer", "tilt_meter", "tilted", "kicker_cooldown", "plunger_charge",
                                    "extra_gravity", "extra_gravity_timer", "event_lockout", "event_cooldown", "serve_delay",
-                                   "kick_strength", "flipper_contact", "collided"]
+                                   "kick_strength", "flipper_contact", "collided", "demo_mode"]
 
     public func input(frame f: Int) -> FrameInput {
         FrameInput(rawValue: f < inputs.count ? inputs[f] : 0)
@@ -191,6 +218,7 @@ public struct Scenario: Sendable {
 
     /// Engine state at frame 0: flippers at rest (or as given), ball 0 as given.
     public func apply(to e: ClassicEngine) {
+        if startAtBoot { applyBoot(to: e); return }
         e.resetToRest()
         // The rules boot state (the original's init, with the harness's options) comes before the
         // scenario's own state, as in the harness (boot, then reset_play_state and pokes).
@@ -232,8 +260,27 @@ public struct Scenario: Sendable {
         // Rules (if attached): the harness's mode; ds_pokes last, like the harness's pokes.
         if let r = e.rules {
             e.rulesMode = mode == "rules" ? .rules : (mode == "full" ? .full : .off)
+            if let v = extras["demo_mode"] { e.setDemoMode(v == 1) }   // the harness pokes the DS byte
             for (a, v, w) in dsPokes { r.machine.write(a, w, Int64(v)) }
         }
+    }
+}
+
+extension Scenario {
+    /// `"start": "boot"`: the state at the first arrival at the main loop, as the harness boots it.
+    func applyBoot(to e: ClassicEngine) {
+        if e.rules?.introSettlesFlippers == true { e.resetToRest() } else { e.resetToPowerOn() }
+        if let gp = gravityPhase { e.gravityPhase = max(0, min(3, gp)) }
+        e.sensorsEnabled = true
+        e.ballLostResets = true
+        guard let r = e.rules else { return }
+        r.options = .harness
+        if let p = players { r.options.players = p }
+        if let b = ballsPerGame { r.options.ballsPerGame = b }
+        r.options.demo = extras["demo_mode"] == 1
+        e.rulesMode = .full
+        r.boot()
+        for (a, v, w) in dsPokes { r.machine.write(a, w, Int64(v)) }
     }
 }
 
@@ -337,6 +384,7 @@ public enum TraceRunner {
         var guardTrips = e.loopGuardTrips, faults = e.divideFaults
         var dsShadow = e.rules?.machine.initialDS ?? []
         if state { e.rules?.traceCalls = true; e.rules?.clearCallLog(); e.rules?.machine.coverage = [] }
+        if sc.watchMessages { e.rules?.traceCalls = true; e.rules?.clearCallLog() }
         var covShadow = Set<Int>()
         e.onStep = { f, s, r in
             let b = e.balls[0]
@@ -358,6 +406,13 @@ public enum TraceRunner {
                 // hangs (push-out loop without a cap) or raises a divide error in such a step.
                 if e.loopGuardTrips != guardTrips { line += ",\"loop_guard\":\(e.loopGuardTrips - guardTrips)" }
                 if e.divideFaults != faults { line += ",\"divide_faults\":\(e.divideFaults - faults)" }
+                if !sc.watchDS.isEmpty || sc.watchMessages, s == e.data.timing.stepsPerFrame - 1, let r = e.rules, e.rulesMode != .off {
+                    if !sc.watchDS.isEmpty { line += ",\"watch_ds\":[\(sc.watchDS.map { String(r.machine.read($0.0, $0.1)) }.joined(separator: ","))]" }
+                    if sc.watchMessages {
+                        line += ",\"messages\":\(r.messageCalls)"
+                        if !state { r.clearCallLog() }
+                    }
+                }
                 if state, s == e.data.timing.stepsPerFrame - 1, let r = e.rules, e.rulesMode != .off {
                     // Rules data segment after the frame, as changes since the previous frame's dump
                     // (the first dump is relative to the EXE's data segment): [[offset, byte], ...].

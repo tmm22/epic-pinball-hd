@@ -58,6 +58,9 @@ final class AudioController {
 
     func toggleSfx() { sfxOn.toggle() }
 
+    /// Stops the playing effects (a practice state restore jumps to another moment of the game).
+    func stopEffects() { engine.stopAllSounds() }
+
     func setPaused(_ paused: Bool) {
         engine.setMusicPaused(paused || musicPaused)
         if paused { engine.stopAllSounds() }
@@ -76,6 +79,11 @@ final class AudioController {
         volumes.master = min(max(volumes.master + master, 0), 1)
         volumes.music = min(max(volumes.music + music, 0), 1)
         engine.setVolumes(volumes)
+    }
+
+    /// Settings > Audio > Resampling (applied from the next render block on).
+    func setInterpolation(_ i: GameSettings.AudioInterpolation) {
+        engine.setInterpolation(i == .smooth ? .smooth : .original)
     }
 
     func stop() { engine.stop() }

@@ -223,8 +223,8 @@ the code); 48 super jackpot; 50/51 sling flashes; 52 test hole; 53 centre eject;
   count; the no-score rule; gate0; the lamp flash; sounds and sweeps. Every one of them agrees with the original code in the differential test (section 5).
 * **Physical meaning inferred [M]**: which ramp or lane a sensor is (from its position and messages); gate0 and
   the diverter as a kickback lane gate and a wire-ramp diverter; lamp slot meanings.
-* **Not determined**: message placement parameters (`message.mode`: AH picks the font/centring, AL is stored
-  in ds:0B3A and was not traced [M]); what `ds:5890` is; the exact on-screen layout of `text` ops.
+* **Not determined**: what `ds:5890` is; the exact on-screen layout of `text` ops. (`message.mode`: AH picks the
+  font/centring, AL in ds:0B3A is render_frame's effect, docs/enhanced/presentation.md [H].)
 
 ---
 
@@ -375,16 +375,27 @@ earlier output, and EP2/EP10 are byte-identical with `--no-auto-hooks`.
    and the drain loop stay as candidates: they are rule code too (EP1 `frame_counters`, `drain`).
 3. A statement is kept if it **lifts completely**. That means only rule-like near calls (gosub) and the display, sound and gate
    routines the lifter stubs; no port I/O, interrupts, string ops, far calls into the graphics library or indirect jumps.
-   It must also **write rule state**. Rule state is a DS address the sensor handlers or the kicker read or write, the lamp
+   It must also **write rule state** or **call dmd_message** (2026-10-01; the message is what the player sees: EP2
+   cs:04AB..0530, EP4 cs:07C4, EP6 cs:04E0, EP7 cs:079C, EP8 cs:0846 show a message every 281 frames until the first plunger
+   release clears the cycle; EP8 also gains cs:0A09 and the ball-end region cs:340A). Rule state is a DS address the sensor handlers or the kicker read or write, the lamp
    table, the score, or an engine role other than the ball and sound. It grows to a fixpoint: a statement is rule code if it
    writes something that rule code reads. Writes that touch only sound/sweep variables or the ball slot arrays do not count.
 4. Adjacent kept statements are merged, with the register set-up statements between them. Statements of more than 12
    instructions form their own hook. A counters or drain fragment is always one hook.
 5. **End of ball**: `ball_lost_fade` (discover.py) is cut into *regions*. Control flow is followed from the routine entry and
    cut at every instruction the lifter cannot express (fades, waits, graphics calls); the instruction after a cut starts the
-   next region. Regions that write rule state and do not pop values pushed before their start become `ball_end_XXXX` hooks,
-   with `continues` giving the next region after each cut.
-6. After lifting, any automatic hook with an unexpressed op is dropped and the table is lifted again (EP5 cs:1f4a).
+   next region, except for port I/O inside a loop (the palette fade, EP2 cs:35AE..35EE), where the next region starts at the
+   loop's exit (`_cut_next`; EP2 cs:35F0 sets the between-balls flag ds:0713 and holds the no-score rule; before 2026-10-01
+   this code was the loop's `pop ax` tail, rejected by the stack test, so EP2/4/6/7 never set the flag and EP4 never paid its
+   bonus). Regions that write rule state and do not pop values pushed before their start become `ball_end_XXXX` hooks,
+   with `continues` giving the next hook after each cut. The way there may pass straight-line regions that are not hooks (one
+   cut, no branch: frame waits, music calls, `lcall`s into the graphics library); their cuts are listed in `via` (additive key,
+   `{cut ip: [cut ips passed]}`), so the chain no longer stops at them (EP9 cs:2F36 -> 2F39, the second dmd_idle_text call ->
+   hook cs:2F3C; EP10 cs:3190 -> 3193 -> hook 3196).
+6. After lifting, any automatic hook with an unexpressed op is dropped and the table is lifted again (EP5 cs:1f4a). A dropped
+   `ball_end` region is written to `native_hooks` (additive top-level key, same fields as a hook, `entry` an ip): both
+   backends run it from the EXE, so the chain still starts there (EP5 cs:1F4A, where demo mode jumps past the bonus and the
+   end-of-turn counters).
 
 **Check on EP1** (`--hooks-check`): the automatic run finds all six EP1 main-loop fragments of `EP1_HOOKS` with the same entry
 and stop: `frame_timers` 06E2..0711, `frame_counters` 09DC..0A17, `drain` 0A31..0A9A, `flipper_lane_change` 102E..1080,
@@ -441,7 +452,9 @@ flipper key flag), `lamp_timer` (a countdown that writes lamp slots), `main` (an
   colours by one. cs:3613 reloads the ring from one of four colour sets (table ds:525C, by [5D07]) at level changes and ball
   end. DOSBox-X captures (frames 240 and 600) match a pure rotation of base >> 2 on 54 of 64 indices (the rest are covered);
   later frames show a reloaded set. The port emits the ring as `PresentationState.paletteOverrides` (PaletteCycle.swift).
-  [M]: the ring's rotation phase after the intro is not reproduced (the original rotates it during its intro fade).
+  The boot's wait_frames rotate the ring during the fade-in and the intro scroll (17 + 2 x 177 calls), so the main loop
+  starts with a rotated ring and [04A5] = 3; `RulesRuntime.boot` writes that state (`ScreenFade.boot`) [H: harness W,
+  counter and DAC after boot, ScreenFadeTests; scenario EP8/fidelity/palette_ring.json EXACT].
 * **All tables**: the hook discovery finds a `frame_counters` hook in all 12. It finds a `drain` hook in EP2, EP4, EP7, EP8 and
   EP10-13; in EP3, EP5, EP6 and EP9 the drain fragment writes nothing that counts as rule state, so there is no drain hook. It
   finds an extra-gravity `frame_timers` hook in EP9-13 (the tables with an extra-gravity term) and a `flipper_press` hook (EP1's
@@ -528,7 +541,8 @@ compared. Some automatic hooks are display-side code (section 4.4 item 1): they 
 * EP2-EP13 boot: the port starts the data segment from the EXE image plus the command-line options; the intro/boot tail
   that EP1's TableGlue `init` runs is not annotated for the others (visible only as the attract text state and EP8's palette
   phase).
-* Message effects (render_frame's per-dot animation, fades) are decoded for timing only; the renderer shows static dots.
+* Message effects: the rules decode render_frame's blocks for timing only (EP1); the presentation runs them from the
+  EXE on a private data segment (docs/enhanced/presentation.md).
 * Runtime check in DOSBox-X: break on cs:1E6A (dispatch) and cs:19C1 (kicker) and compare with `verify_ir.py` traces.
 
 ## 7. The Swift port's interpreter (`app/Sources/PinballCore/Rules/`)
@@ -539,7 +553,24 @@ compared. Some automatic hooks are display-side code (section 4.4 item 1): they 
   `call`, an unsupported instruction or a jump out of range stops it and is reported, never guessed.
 * `RulesRuntime` does sensor dispatch (cs:1E3B semantics, jump table read from the EXE, per-ball lockout for EP9-13), the
   kicker hook, the main-loop schedule (EP1: annotated order; EP2-13: `every_frame` hooks in entry order interleaved with the
-  engine's pieces at their `found_at` ips), end of ball (`ball_end` hooks following `continues`, then the end-of-turn
-  counters), lamp_update, render_frame's message counter, sfx_play -> `SoundEvent`, the EP8 palette ring, and fills
-  `PresentationState` (mapping in the comment block on `RulesRuntime`).
+  engine's pieces at their `found_at` ips), end of ball (`ball_end` and `native_hooks` from the lowest entry, following
+  `continues` and running each cut and `via` cut as the original does: near calls from the EXE, frame waits as one
+  render_frame step (EP8: and one palette-ring step), the game-over menu call (`mov di,3039h`, a routine that starts `cmp
+  di,3039h`) ends the chain; then the end-of-turn counters, only on tables whose hooks do not contain that code, which is none
+  of EP2-EP13 now), lamp_update, render_frame's message counter (EP2-EP13: the effect blocks run from the EXE on a private data
+  segment, `DotEffects`, with the counter word, step word and effect sounds taken back), sfx_play -> `SoundEvent`, the EP8
+  palette ring, and fills `PresentationState` (mapping in the comment block on `RulesRuntime`).
+* EP2-EP13 glue found by code shape (`TableGlue`, 2026-10-01; both backends run it from the EXE, near calls followed):
+  the plunger lane's rule fragments `serve2`, `serve1`, `release`, `release2` (EP2 cs:0BDD, 0BEA, 0C85, 0CAA: launch sounds,
+  the timed-message stop, dmd_idle_text, and with the between-balls flag the next-ball message, bonus counters cleared,
+  W = B >> 2 and the flag cleared; EP8 has a launch block instead), the boot's tail after the intro scroll loop `bootTail`
+  (EP2 cs:0486..04AB: intro message unless demo, message counter 32h, lamp and skill-lane setup) and EP9-EP13's
+  between-balls display `betweenBalls` (EP12 cs:049A..04AA: while ds:059F is set, cs:4149 shows the bonus lines and then clears
+  the per-ball counters). EP9-EP13's score_refresh (EP12 cs:3FFE) shows the idle display again while it is the message shown;
+  it runs from the EXE instead of being a display stub.
+* dmd_message as the runtime models it (both backends, 2026-10-01): a string longer than 30 characters or too wide to centre
+  changes nothing (EP6 cs:15D1..1600); the stores at the routine's common exit run on every path (EP6 cs:1658 `[577Ah] =
+  -40`, a rule timer cs:3255 counts up; EP7 `[50F0h] = -50`; EP9-13 the idle-display flag = 0); EP5/EP6 turn every message
+  into the demo text in demo mode (EP6 cs:15AF). Cut calls in the end-of-ball chain that call far into code the callout
+  does not know are skipped as display/sound (EP2 cs:3CBA, called with BX = 3 / 7 between the frame waits).
 * `PaletteCycle` (EP8 cs:1281) and `TableGlue` hold the only per-table code knowledge, as addresses or code signatures.

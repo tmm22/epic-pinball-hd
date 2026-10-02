@@ -2,7 +2,7 @@ import COpenMPT
 import Foundation
 
 /// How samples are resampled to the output rate.
-public enum AudioInterpolation: Sendable {
+public enum AudioInterpolation: String, Sendable, CaseIterable {
     /// Nearest neighbour with a 16.16 step truncated like the MASI SB driver
     /// (MDRV004R file 0xB03) and nearest-neighbour libopenmpt music. Default.
     case original
@@ -47,7 +47,8 @@ final class ClassicMixer: @unchecked Sendable {
     static let maxSongs = 32
 
     let sampleRate: Int
-    let interpolation: AudioInterpolation
+    /// Render-thread state: changed by `.interpolation` commands (`AudioEngine.setInterpolation`).
+    private(set) var interpolation: AudioInterpolation
     let maxBlock: Int
 
     // SFX bank, immutable after init.
@@ -127,11 +128,17 @@ final class ClassicMixer: @unchecked Sendable {
     /// Makes a module available as song `song`. Call from the control thread
     /// before queueing a `.music` command for that slot; slots are write-once
     /// while the audio thread may be running.
-    func install(module: MusicModule, song: Int) {
+    /// `interpolation`: the control thread's current choice (default: the mixer's own, for a
+    /// mixer that is not rendering yet). The module is not visible to the audio thread until the
+    /// slot is written, so setting its filter here does not race.
+    func install(module: MusicModule, song: Int, interpolation i: AudioInterpolation? = nil) {
         precondition((0..<Self.maxSongs).contains(song))
-        module.setInterpolation(filterLength: interpolation == .original ? 1 : 0)
+        module.setInterpolation(filterLength: Self.filterLength(i ?? interpolation))
         songSlots[song] = module.handle
     }
+
+    /// libopenmpt's interpolation filter length: 1 = nearest neighbour, 0 = its default.
+    static func filterLength(_ i: AudioInterpolation) -> Int32 { i == .original ? 1 : 0 }
 
     func hasSong(_ song: Int) -> Bool {
         (0..<Self.maxSongs).contains(song) && songSlots[song] != nil
@@ -170,6 +177,13 @@ final class ClassicMixer: @unchecked Sendable {
         case let .pauseMusic(p): musicPaused = p
         case let .volumes(m, s, mu):
             master = m; sfxGain = s; musicGain = mu
+        case let .interpolation(smooth):
+            // Takes effect from this block on (playing voices keep their position). Setting a
+            // render parameter is a plain store in libopenmpt, no allocation.
+            let i: AudioInterpolation = smooth ? .smooth : .original
+            guard i != interpolation else { return }
+            interpolation = i
+            for k in 0..<Self.maxSongs { if let h = songSlots[k] { _ = openmpt_module_set_render_param(h, Int32(OPENMPT_MODULE_RENDER_INTERPOLATIONFILTER_LENGTH), Self.filterLength(i)) } }
         }
     }
 

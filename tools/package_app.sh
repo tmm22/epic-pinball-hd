@@ -3,6 +3,7 @@
 #
 #   tools/package_app.sh [--bundle-id ID] [--version X.Y] [--no-zip] [--skip-build] [--original DIR]
 #                        [--scratch-path DIR] [--no-run-check] [--lenient] [--iso FILE] [--keep-check DIR]
+#                        [--hardened] [--sign IDENTITY] [--notarize PROFILE] [--entitlements FILE]
 #
 # * Release build of the SwiftPM package in app/ (arm64).
 # * Info.plist from app/Resources/Info.plist, icon drawn by app/Resources/make_icon.swift
@@ -11,7 +12,17 @@
 # * libopenmpt and every non-system dylib it pulls in (mpg123, ogg, vorbis ...) copied to
 #   Contents/Frameworks with install names rewritten to @rpath / @loader_path, so the app runs
 #   on a Mac without Homebrew. Checked with otool -L afterwards.
-# * Ad-hoc code signature (codesign --sign -), verified.
+# * Ad-hoc code signature (codesign --sign -), verified. That is the default and unchanged.
+#   Distribution (all optional, also as environment variables):
+#     --sign ID / DEVELOPER_ID="Developer ID Application: Name (TEAMID)": sign with that identity,
+#       hardened runtime, secure timestamp and app/Resources/EpicPinballHD.entitlements.
+#     --hardened / HARDENED=1 (or --sign -): the hardened runtime and entitlements with the ad-hoc
+#       signature, a local check of the hardened path without a certificate; not for distribution.
+#       Ad-hoc dylibs have no Team ID, so this variant alone adds disable-library-validation.
+#     --notarize P / NOTARY_PROFILE=P: after the runtime check, submit to Apple's notary service with
+#       the notarytool keychain profile P (xcrun notarytool store-credentials P ...), wait, staple
+#       the ticket to the .app, check it with stapler and spctl, then zip the stapled app.
+#       Needs --sign / DEVELOPER_ID.
 # * Refuses to finish if anything that looks like game data is inside the bundle.
 # * Runtime check (skip with --no-run-check): the packaged binary is started with
 #   DYLD_PRINT_LIBRARIES and must load no dylib from Homebrew or the build tree. Then, under
@@ -20,7 +31,10 @@
 #   away, it imports your CD image (--iso, default the first *.iso in the repo root; else original/)
 #   into a fresh support dir with --headless-import, plays a game to game over with --autoplay
 #   (table 1 classic physics, table 10 enhanced physics) and renders an xbrz + lighting --snapshot
-#   from that library. A failure stops the script before the zip (--lenient: warning only).
+#   from that library; then it makes table 1's 4x HD pack with --make-hd-pack (Swift, no Python)
+#   and renders a --snapshot with it. A failure stops the script before the zip (--lenient: warning only).
+#   Under the hardened runtime dyld ignores DYLD_PRINT_LIBRARIES, so the dylib part asks the
+#   binary itself (--list-dylibs prints every image loaded into the process).
 #
 # The bundle contains no game data: tables, sounds and texts are read at runtime from the
 # user's own files (imported into ~/Library/Application Support/EpicPinballHD/).
@@ -39,6 +53,10 @@ RUN_CHECK=1
 STRICT=1                    # a failed runtime check stops the script before the zip (--lenient: warn only)
 ISO=""                      # --iso FILE: the CD image the runtime check imports (default: the first *.iso in the repo root)
 KEEP_CHECK=""               # --keep-check DIR: keep the runtime check's outputs (import log, reports, snapshot)
+SIGN_ID="${DEVELOPER_ID:-}" # --sign: Developer ID Application identity (empty = ad-hoc)
+HARDENED="${HARDENED:-0}"   # --hardened: hardened runtime + entitlements (implied by a Developer ID)
+NOTARY="${NOTARY_PROFILE:-}" # --notarize: notarytool keychain profile
+ENTITLEMENTS=""             # --entitlements FILE (default app/Resources/EpicPinballHD.entitlements)
 while [ $# -gt 0 ]; do
     case "$1" in
         --bundle-id) BUNDLE_ID="$2"; shift ;;
@@ -52,7 +70,11 @@ while [ $# -gt 0 ]; do
         --lenient) STRICT=0 ;;
         --iso) ISO="$2"; shift ;;
         --keep-check) KEEP_CHECK="$2"; shift ;;
-        -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+        --sign) SIGN_ID="$2"; shift ;;
+        --hardened) HARDENED=1 ;;
+        --notarize) NOTARY="$2"; shift ;;
+        --entitlements) ENTITLEMENTS="$2"; shift ;;
+        -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
         *) echo "unknown argument $1" >&2; exit 2 ;;
     esac
     shift
@@ -61,6 +83,23 @@ BUILD_NUMBER="$(date +%Y%m%d%H%M)"
 APP="$OUT/EpicPinballHD.app"
 say() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 die() { printf 'package_app: error: %s\n' "$*" >&2; exit 1; }
+[ -n "$ENTITLEMENTS" ] || ENTITLEMENTS="$APPDIR/Resources/EpicPinballHD.entitlements"
+case "$HARDENED" in ""|0) HARDENED=0 ;; *) HARDENED=1 ;; esac   # HARDENED=true/yes/... means on
+[ -n "$SIGN_ID" ] && HARDENED=1
+[ "$SIGN_ID" = "-" ] && SIGN_ID=""
+if [ -n "$NOTARY" ]; then
+    [ -n "$SIGN_ID" ] || die "--notarize / NOTARY_PROFILE needs a Developer ID signature (--sign / DEVELOPER_ID)"
+    command -v xcrun >/dev/null && xcrun --find notarytool >/dev/null 2>&1 || die "xcrun notarytool not found (install the Xcode command line tools)"
+fi
+if [ -n "$SIGN_ID" ]; then
+    IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+    grep -qF -- "$SIGN_ID" <<<"$IDENTITIES" \
+        || die "signing identity '$SIGN_ID' not in the keychain (security find-identity -v -p codesigning)"
+fi
+if [ "$HARDENED" = 1 ]; then
+    [ -f "$ENTITLEMENTS" ] || die "entitlements file $ENTITLEMENTS missing"
+    plutil -lint "$ENTITLEMENTS" >/dev/null || die "entitlements file $ENTITLEMENTS is not a valid plist"
+fi
 
 # ---------------------------------------------------------------- build
 cd "$APPDIR"
@@ -219,10 +258,51 @@ else
 fi
 
 # ---------------------------------------------------------------- sign
-say "ad-hoc codesign"
-for f in "$FW"/*.dylib; do codesign --force --sign - --timestamp=none "$f"; done
-codesign --force --sign - --timestamp=none "$APP"
-codesign --verify --strict --verbose=2 "$APP"
+if [ "$HARDENED" = 0 ]; then
+    say "ad-hoc codesign"
+    for f in "$FW"/*.dylib; do codesign --force --sign - --timestamp=none "$f"; done
+    codesign --force --sign - --timestamp=none "$APP"
+    codesign --verify --strict --verbose=2 "$APP"
+else
+    # Hardened runtime (required for notarization): dylibs first, then the app with the entitlements.
+    # A Developer ID signature gets a secure timestamp; the ad-hoc variant cannot have one.
+    if [ -n "$SIGN_ID" ]; then ID="$SIGN_ID"; TS=(--timestamp); say "codesign: $SIGN_ID, hardened runtime"
+    else ID="-"; TS=(--timestamp=none); say "ad-hoc codesign with the hardened runtime (local check, not for distribution)"; fi
+    SIGN_ENT="$ENTITLEMENTS"
+    if [ -z "$SIGN_ID" ]; then
+        # Library validation needs the dylibs and the process to share a Team ID, and ad-hoc
+        # signatures have none ("mapping process and mapped file (non-platform) have different
+        # Team IDs"), so this local check alone adds disable-library-validation. A Developer ID
+        # build signs everything with one team and uses the entitlements file as it is.
+        SIGN_ENT="$OUT/.adhoc-hardened.entitlements"
+        cp "$ENTITLEMENTS" "$SIGN_ENT"
+        /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$SIGN_ENT" >/dev/null
+        echo "   (ad-hoc only: + com.apple.security.cs.disable-library-validation, ad-hoc dylibs have no Team ID)"
+    fi
+    for f in "$FW"/*.dylib; do codesign --force --options runtime "${TS[@]}" --sign "$ID" "$f"; done
+    codesign --force --options runtime "${TS[@]}" --entitlements "$SIGN_ENT" --sign "$ID" "$APP"
+    [ "$SIGN_ENT" = "$ENTITLEMENTS" ] || rm -f "$SIGN_ENT"
+    codesign --verify --strict --verbose=2 "$APP"
+    # (codesign output captured first: `codesign | grep -q` would trip pipefail on SIGPIPE)
+    for f in "$EXE" "$FW"/*.dylib; do
+        SIGINFO="$(codesign -dv "$f" 2>&1 || true)"
+        grep -Eq '^CodeDirectory .*flags=0x[0-9a-f]*\(.*runtime' <<<"$SIGINFO" \
+            || die "$(basename "$f") is not signed with the hardened runtime"
+    done
+    ENT_SIGNED="$(codesign -d --entitlements - --xml "$APP" 2>/dev/null || true)"
+    if grep -q 'get-task-allow' <<<"$ENT_SIGNED"; then die "the signature carries get-task-allow (notarization would reject it)"; fi
+    echo "   hardened runtime on the executable and $(ls "$FW"/*.dylib | wc -l | tr -d ' ') dylibs; entitlements: $(basename "$ENTITLEMENTS")"
+    if [ -n "$SIGN_ID" ]; then
+        SIGINFO="$(codesign -dv "$APP" 2>&1 || true)"
+        TEAM="$(awk -F= '/^TeamIdentifier=/{print $2}' <<<"$SIGINFO")"
+        [ -n "$TEAM" ] && [ "$TEAM" != "not set" ] || die "no team identifier in the signature (is '$SIGN_ID' a Developer ID Application identity?)"
+        for f in "$FW"/*.dylib; do
+            [ "$(codesign -dv "$f" 2>&1 | awk -F= '/^TeamIdentifier=/{print $2}')" = "$TEAM" ] || die "$(basename "$f") has another team id (library validation would fail)"
+        done
+        grep -q '^Timestamp=' <<<"$SIGINFO" || die "no secure timestamp on the signature"
+        echo "   team $TEAM on the app and every dylib; secure timestamp present"
+    fi
+fi
 
 # ---------------------------------------------------------------- runtime check
 RUN_OK=1
@@ -230,12 +310,19 @@ if [ "$RUN_CHECK" = 1 ]; then
     say "runtime check"
     TMPC="$(cd "$(mktemp -d)" && pwd -P)"
     # 1. every dylib the binary loads is a system library or one of Contents/Frameworks
-    DYLD_PRINT_LIBRARIES=1 "$EXE" --help >/dev/null 2>"$TMPC/dyld.txt" || true
+    #    (the hardened runtime ignores DYLD_PRINT_LIBRARIES: the binary lists its own images instead)
+    if [ "$HARDENED" = 1 ]; then
+        "$EXE" --list-dylibs >"$TMPC/dyld.txt" 2>&1 || { echo "   FAIL: the hardened binary did not start:"; tail -3 "$TMPC/dyld.txt" | sed 's/^/      /'; RUN_OK=0; }
+    else
+        DYLD_PRINT_LIBRARIES=1 "$EXE" --help >/dev/null 2>"$TMPC/dyld.txt" || true
+    fi
     LOADED="$(grep -Eo '(/[^ ]+\.dylib|/[^ ]+/Frameworks/[^ ]+)' "$TMPC/dyld.txt" | sort -u || true)"
     OUTSIDE="$(echo "$LOADED" | grep -vF "$APP/Contents/Frameworks/" | grep -E '^(/opt/homebrew|/usr/local|'"$ROOT"')' || true)"
     INSIDE="$(echo "$LOADED" | grep -c "^$APP/Contents/Frameworks/" || true)"
     if [ -n "$OUTSIDE" ]; then
         echo "   FAIL: loaded from outside the bundle:"; echo "$OUTSIDE" | sed 's/^/      /'; RUN_OK=0
+    elif [ "$HARDENED" = 1 ] && [ "$INSIDE" -lt "$(ls "$FW"/*.dylib | wc -l)" ]; then
+        echo "   FAIL: only $INSIDE of the embedded dylibs were loaded (check the dylib listing)"; RUN_OK=0
     else
         echo "   dylibs: $INSIDE loaded from Contents/Frameworks, none from Homebrew or the build tree"
     fi
@@ -261,7 +348,7 @@ if [ "$RUN_CHECK" = 1 ]; then
         HIDDEN="$RES_BUNDLE.hidden-by-package-app"
         mv "$RES_BUNDLE" "$HIDDEN"
         trap 'mv "$HIDDEN" "$RES_BUNDLE" 2>/dev/null || true' EXIT
-        run() { env -u EPIC_PINBALL_DATA -u EPIC_PINBALL_ORIGINAL -u EPIC_PINBALL_RULES -u EPIC_PINBALL_RENDER \
+        run() { env -u EPIC_PINBALL_DATA -u EPIC_PINBALL_ORIGINAL -u EPIC_PINBALL_RULES -u EPIC_PINBALL_RENDER -u EPIC_PINBALL_HDPACKS \
                     sandbox-exec -f "$PROFILE" "$EXE" --support-dir "$SUPPORT" "$@"; }
         if ! sandbox-exec -f "$PROFILE" ls "$ROOT/extracted" >/dev/null 2>&1; then
             echo "   sandbox: extracted/, .venv, the build trees$( [ "$SRC" != "$ORIGINAL" ] && echo ', original/') unreadable; python not executable"
@@ -289,6 +376,15 @@ if [ "$RUN_CHECK" = 1 ]; then
         else
             echo "   FAIL: snapshot from the imported library:"; tail -3 "$TMPC/snap.txt" | sed 's/^/      /'; RUN_OK=0
         fi
+        # HD pack made in the sandbox by the packaged binary (into <support>/HDPacks/EP1), then used
+        if run --library "$SUPPORT/Library" --make-hd-pack 1 --scale 4 --verify-hd-pack >"$TMPC/hdpack.txt" 2>&1 \
+                && [ -f "$SUPPORT/HDPacks/EP1/pack.json" ] \
+                && run --library "$SUPPORT/Library" --table 1 --snapshot "$TMPC/snap_hd.png" --launch --sim-time 1 --filter smooth --hd-pack \
+                    >"$TMPC/snap_hd.txt" 2>&1 && grep -q "hd pack on" "$TMPC/snap_hd.txt" && ! grep -q "HD pack:" "$TMPC/snap_hd.txt"; then
+            echo "   HD pack: $(head -1 "$TMPC/hdpack.txt" | sed 's/ -> .* in / in /'); $(sed -n 2p "$TMPC/hdpack.txt" | sed 's/^ *//' | cut -c1-60)...; snapshot with it: hd pack on"
+        else
+            echo "   FAIL: HD pack from the imported library:"; tail -3 "$TMPC/hdpack.txt" "$TMPC/snap_hd.txt" 2>/dev/null | sed 's/^/      /'; RUN_OK=0
+        fi
         if [ -n "$KEEP_CHECK" ]; then rm -rf "$KEEP_CHECK"; mkdir -p "$KEEP_CHECK"; cp "$TMPC"/*.txt "$TMPC"/*.json "$TMPC"/*.png "$TMPC"/*.err "$KEEP_CHECK"/ 2>/dev/null || true; echo "   check outputs kept in $KEEP_CHECK"; fi
         mv "$HIDDEN" "$RES_BUNDLE"; trap - EXIT
     else
@@ -299,6 +395,29 @@ if [ "$RUN_CHECK" = 1 ]; then
         [ "$STRICT" = 1 ] && die "runtime check failed (use --lenient to package anyway)"
         printf '\033[1;33mpackage_app: warning: runtime check failed (see above); the app may not run on other Macs\033[0m\n' >&2
     fi
+fi
+
+# ---------------------------------------------------------------- notarize + staple
+if [ -n "$NOTARY" ]; then
+    say "notarization (profile $NOTARY)"
+    NZIP="$OUT/EpicPinballHD-notarize.zip"
+    rm -f "$NZIP"
+    ditto -c -k --sequesterRsrc --keepParent "$APP" "$NZIP"
+    xcrun notarytool submit "$NZIP" --keychain-profile "$NOTARY" --wait --output-format json >"$OUT/notarize.json" \
+        || { cat "$OUT/notarize.json" >&2; die "notarytool submit failed"; }
+    NSTATUS="$(plutil -extract status raw -o - "$OUT/notarize.json" 2>/dev/null || true)"
+    NID="$(plutil -extract id raw -o - "$OUT/notarize.json" 2>/dev/null || true)"
+    echo "   submission $NID: $NSTATUS"
+    if [ "$NSTATUS" != "Accepted" ]; then
+        [ -n "$NID" ] && xcrun notarytool log "$NID" --keychain-profile "$NOTARY" "$OUT/notarize-log.json" >/dev/null 2>&1 \
+            && echo "   notary log: $OUT/notarize-log.json"
+        die "notarization was not accepted ($NSTATUS)"
+    fi
+    rm -f "$NZIP"
+    xcrun stapler staple "$APP"
+    xcrun stapler validate "$APP"
+    spctl --assess --type execute --verbose=4 "$APP" 2>&1 | sed 's/^/   /'
+    spctl --assess --type execute "$APP" 2>/dev/null || die "Gatekeeper (spctl) rejects the stapled app"
 fi
 
 # ---------------------------------------------------------------- zip

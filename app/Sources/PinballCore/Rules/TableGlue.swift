@@ -69,6 +69,10 @@ public struct TableGlue: Sendable {
 
     /// Near-call targets MiniX86 executes (collision-buffer drawing routines called by glue ranges).
     public var follow: Set<Int> = []
+    /// Ranges whose near calls are all executed from the EXE (the discovered lane glue: EP6 cs:0BD5
+    /// calls dmd_idle_text cs:31E1, which the lift treats as a display call), as in rule-code `call`
+    /// ops; far calls still go through the callout (display, sound).
+    public var followNearCalls: Set<String> = []
 
     public static let none = TableGlue()
     public var isEmpty: Bool { ranges.isEmpty }
@@ -77,11 +81,12 @@ public struct TableGlue: Sendable {
 
     /// Glue for a table whose code we have read (EP1 fully, EP10 one physics fragment). Other tables
     /// get `.none` (their main-loop fragments are not annotated yet, rules.md 4 item 1).
-    public static func make(program p: RulesProgram, machine m: RulesMachine) -> TableGlue {
+    public static func make(program p: RulesProgram, machine m: RulesMachine, layout: EngineLayout? = nil) -> TableGlue {
         if p.table == 10, p.codeSegment == 0x31A4, p.dispatcherIP == 0x1E32 {
             var g = ep10(m)
             discoverSound(program: p, machine: m, into: &g)
             discoverEndOfTurn(machine: m, into: &g)
+            if let l = layout { discoverLane(machine: m, layout: l, into: &g); discoverBootTail(machine: m, layout: l, into: &g); discoverBetweenBalls(machine: m, layout: l, into: &g) }
             return g
         }
         if (p.table == 8 && p.codeSegment == 0x353A && p.dispatcherIP == 0x1F9F)
@@ -89,6 +94,7 @@ public struct TableGlue: Sendable {
             var g = ruleDrivenMainLoop(p.table, m)
             discoverSound(program: p, machine: m, into: &g)
             discoverEndOfTurn(machine: m, into: &g)
+            if let l = layout { discoverLane(machine: m, layout: l, into: &g); discoverBootTail(machine: m, layout: l, into: &g); discoverBetweenBalls(machine: m, layout: l, into: &g) }
             return g
         }
         guard p.table == 1, p.codeSegment == 0x3223, p.dataSegment == 0x0015, p.dispatcherIP == 0x1E3B,
@@ -96,6 +102,7 @@ public struct TableGlue: Sendable {
             var g = TableGlue()
             discoverSound(program: p, machine: m, into: &g)
             discoverEndOfTurn(machine: m, into: &g)
+            if let l = layout { discoverLane(machine: m, layout: l, into: &g); discoverBootTail(machine: m, layout: l, into: &g); discoverBetweenBalls(machine: m, layout: l, into: &g) }
             return g
         }
         var g = TableGlue()
@@ -198,6 +205,101 @@ public struct TableGlue: Sendable {
         }
         g.follow = table == 8 ? [0x429E] : [0x40B0]
         return g
+    }
+
+    /// The rule side of the plunger lane (EP1 hand glue `serve2`, `serve1`, `release`, `release2`),
+    /// found in the other tables by the shape they share with EP1 cs:0A9D..0C48 (EP2 cs:0BB4..0D2E shown)
+    /// [H: code; the effects are checked against the harness by the scenarios in tools/emu/scenarios/EPn/hand]:
+    /// * `serve2` after `dec byte [SD]; cmp byte [SD],2; jne` (EP2 cs:0BDD `mov word [sound.queue],5`),
+    /// * `serve1` after `cmp byte [SD],1; jne` up to the `call ball_lost_fade` (EP2 cs:0BEA..0BFC),
+    /// * `release` after `mov word [vx0],0; cmp word [C],0; je` up to `mov ax,[C]; mov word [C],0;
+    ///   sub [vy0],ax; dec word [y0]` (the launch impulse the engine applies; EP2 cs:0C85..0C99: the
+    ///   plunger drawn back, the launch sound),
+    /// * `release2` after the impulse up to the DAC write `mov dx,3C8h` or the lane's end (EP2
+    ///   cs:0CAA..0D04: the idle text, the timed message off, and with the between-balls flag set
+    ///   ds:0713 the next-ball message, the bonus counters cleared, W = B >> 2 and the flag cleared).
+    /// SD is the serve delay (EngineLayout), C the plunger charge (from the impulse). EP8's lane has
+    /// another shape (its launch block, `ClassicEngine.launchBlock`) and gets none of these.
+    static func discoverLane(machine m: RulesMachine, layout l: EngineLayout, into g: inout TableGlue) {
+        guard g.ranges["release"] == nil, let blf = l.ballLostFade,
+              let lane = l.physicsRanges.first(where: { r in r.skips.contains { m.code[$0] == 0xE8 && EngineLayout.rel16(m.code, $0) == blf } }),
+              let sd = l.dsVars["serve_delay"], let vx = l.dsVars["ball_vx"], let vy = l.dsVars["ball_vy"], let y0 = l.dsVars["ball_y"] else { return }
+        let c = m.code
+        func w(_ i: Int) -> Int { Int(c[i & 0xFFFF]) | Int(c[(i + 1) & 0xFFFF]) << 8 }
+        func r8(_ i: Int) -> Int { let v = Int(c[i & 0xFFFF]); return (i + 1 + (v >= 0x80 ? v - 0x100 : v)) & 0xFFFF }
+        let x = MiniX86(machine: m)
+        var found: [String: GlueRange] = [:]
+        let (a, b) = (lane.start, lane.end)
+        let call = lane.skips.first { c[$0] == 0xE8 && EngineLayout.rel16(c, $0) == blf }!
+        // dec byte [SD]; cmp byte [SD],2; jne L2; ...; L2: cmp byte [SD],1; jne PL; ...; call ball_lost_fade
+        // (EP5, EP6: no `cmp 2` step, `dec byte [SD]` is followed by the `cmp byte [SD],1`)
+        for i in a..<(b - 18) where c[i] == 0xFE && c[i + 1] == 0x0E && w(i + 2) == sd
+            && c[i + 4] == 0x80 && c[i + 5] == 0x3E && w(i + 6) == sd && (c[i + 8] == 2 || c[i + 8] == 1) && c[i + 9] == 0x75 {
+            let l2 = c[i + 8] == 2 ? r8(i + 10) : i + 4
+            guard c[l2] == 0x80, c[l2 + 1] == 0x3E, w(l2 + 2) == sd, c[l2 + 4] == 1, c[l2 + 5] == 0x75, l2 + 6 <= call else { break }
+            if i + 11 < l2 { found["serve2"] = GlueRange(i + 11, l2) }
+            if l2 + 7 < call { found["serve1"] = GlueRange(l2 + 7, call) }
+            break
+        }
+        // mov word [vx0],0; cmp word [C],0; je OUT; R1; mov ax,[C]; mov word [C],0; sub [vy0],ax; dec word [y0]; R2
+        for i in a..<(b - 11) where c[i] == 0xC7 && c[i + 1] == 0x06 && w(i + 2) == vx && w(i + 4) == 0
+            && c[i + 6] == 0x83 && c[i + 7] == 0x3E && c[i + 10] == 0 && c[i + 11] == 0x74 {
+            let ch = w(i + 8)
+            let r1 = i + 13
+            guard let imp = (r1..<(b - 17)).first(where: { j in
+                c[j] == 0xA1 && w(j + 1) == ch && c[j + 3] == 0xC7 && c[j + 4] == 0x06 && w(j + 5) == ch && w(j + 7) == 0
+                    && c[j + 9] == 0x29 && c[j + 10] == 0x06 && w(j + 11) == vy && c[j + 13] == 0xFF && c[j + 14] == 0x0E && w(j + 15) == y0
+            }) else { break }
+            if r1 < imp { found["release"] = GlueRange(r1, imp) }
+            let r2 = imp + 17
+            let end = (r2..<(b - 2)).first { c[$0] == 0xBA && w($0 + 1) == 0x3C8 } ?? b
+            if r2 < end { found["release2"] = GlueRange(r2, end) }
+            break
+        }
+        for (name, r) in found {
+            let v = x.validate(from: r.start, to: r.end)
+            if v == .completed { g.ranges[name] = r; g.followNearCalls.insert(name) } else {
+                g.warnings.append("lane glue \(name) cs:\(hex4(r.start)) does not decode (\(v)); skipped")
+            }
+        }
+    }
+
+    /// The boot's last piece before the main loop (EP1 glue `init` ends with it, cs:04B5..04D2), found
+    /// after the intro scroll loop every table shares (`add ax,50h; cmp ax,37A0h; jae TAIL`, EP2
+    /// cs:0465; EP9-13 `cmp ax,3930h`, EP10 cs:046D): TAIL up to the main loop, `bootTail` (EP2 cs:0486..04AB: unless demo mode the intro
+    /// message dmd_message(ds:07E1, AX 6, DI 7080h), then the message counter ds:0A22 = 32h, a lamp
+    /// set blinking and the skill lane). The intro loop itself (scroll, frame waits, the attract lamp
+    /// table) is display and is not run. [H: code; the counter and the message are checked against the
+    /// harness by tools/emu/scenarios/EPn/hand/boot_*.json]
+    static func discoverBootTail(machine m: RulesMachine, layout l: EngineLayout, into g: inout TableGlue) {
+        let c = m.code
+        let lo = max(0, l.mainLoop - 0x100)
+        guard let i = (lo..<l.mainLoop).last(where: { j in
+            c[j] == 0x05 && c[j + 1] == 0x50 && c[j + 2] == 0x00 && c[j + 3] == 0x3D && c[j + 6] == 0x73
+        }) else { return }
+        let tail = (i + 8 + Int(c[i + 7])) & 0xFFFF
+        guard tail < l.mainLoop, l.mainLoop - tail < 0x80 else { return }
+        let v = MiniX86(machine: m).validate(from: tail, to: l.mainLoop)
+        if v == .completed { g.ranges["bootTail"] = GlueRange(tail, l.mainLoop); g.followNearCalls.insert("bootTail") } else {
+            g.warnings.append("boot tail cs:\(hex4(tail)) does not decode (\(v)); skipped")
+        }
+    }
+
+    /// EP9-EP13: the main loop starts with the between-balls display (EP12 cs:049A: `cmp byte [F],0;
+    /// je G; inc word [C]; call R; jmp OUT`, F set by ball_lost_fade, R = cs:4149): while F is set, R
+    /// shows the end-of-ball bonus lines one after the other as C counts frames, then clears the
+    /// per-ball counters, sets four lamps and clears F. The statement also holds the game-over menu
+    /// call (at G), so the hook search rejects it; `betweenBalls` is the first part, run from the EXE.
+    /// [H: code; the messages are checked against the harness by the EPn attract and hand scenarios]
+    static func discoverBetweenBalls(machine m: RulesMachine, layout l: EngineLayout, into g: inout TableGlue) {
+        let c = m.code, a = l.mainLoop
+        guard a + 16 < 0x10000, c[a] == 0x80, c[a + 1] == 0x3E, c[a + 4] == 0, c[a + 5] == 0x74,
+              c[a + 7] == 0xFF, c[a + 8] == 0x06, c[a + 11] == 0xE8, c[a + 14] == 0xEB,
+              (a + 7 + Int(c[a + 6])) & 0xFFFF == a + 16 || c[a + 16] == 0x90 && (a + 7 + Int(c[a + 6])) & 0xFFFF == a + 17 else { return }
+        let v = MiniX86(machine: m).validate(from: a, to: a + 16)
+        if v == .completed { g.ranges["betweenBalls"] = GlueRange(a, a + 16); g.followNearCalls.insert("betweenBalls") } else {
+            g.warnings.append("between-balls display cs:\(hex4(a)) does not decode (\(v)); skipped")
+        }
     }
 
     /// The end-of-turn player/ball counters, found by the code every table shares with EP1 cs:343E

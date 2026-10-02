@@ -63,8 +63,11 @@ final class HeadlessGameTests: XCTestCase {
         e.startGame()
         for _ in 0..<20 { e.runFrame() }
         let s = e.takePresentation()
-        XCTAssertEqual(s.paletteOverrides.count, 64)
-        XCTAssertEqual(s.paletteOverrides.first?.index, 0xA0)
+        // the ring's 64 entries come last (the boot fade-in's palette entries, PaletteFade, come first)
+        let ring = s.paletteOverrides.suffix(64)
+        XCTAssertEqual(ring.count, 64)
+        XCTAssertEqual(ring.first?.index, 0xA0)
+        XCTAssertEqual(ring.last?.index, 0xDF)
         for n in [1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12, 13] {
             guard let o = try? engine(n) else { continue }
             XCTAssertNil(o.rules?.paletteCycle, "EP\(n) has no palette ring")

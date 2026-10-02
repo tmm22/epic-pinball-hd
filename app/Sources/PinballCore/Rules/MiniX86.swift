@@ -128,6 +128,9 @@ public final class MiniX86 {
     /// kicker with this ES.
     public static let contactSegment: UInt16 = 0x7777
     public var contactColour: UInt8 = 0
+    /// Port writes (port, AL or AX) when set; nil = ignored, as the rules runtime wants (VGA display
+    /// only). `DotEffects` sets it to follow render_frame's DAC writes.
+    public var portWrite: ((Int, UInt16) -> Void)?
     private var retraceBit = false
     /// ES -> linear collision-buffer offset of ES:0 (nil if ES is not a playfield segment).
     @inline(__always) func playfieldBase(_ seg: UInt16) -> Int? {
@@ -607,8 +610,10 @@ public final class MiniX86 {
             case 0x9D: flagsWord = pop()
             case 0x9E: let a = UInt16(reg8(4)); flagsWord = (flagsWord & 0xFF00) | a
             case 0x9F: setReg8(4, UInt8(flagsWord & 0xFF))
-            case 0xEE, 0xEF: break                 // out dx, al/ax: VGA palette/registers (display only)
-            case 0xE6, 0xE7: p += 1                // out imm8, al/ax
+            case 0xEE, 0xEF:                       // out dx, al/ax: VGA palette/registers (display only)
+                portWrite?(Int(r[2]), op == 0xEE ? r[0] & 0xFF : r[0])
+            case 0xE6, 0xE7:                       // out imm8, al/ax
+                portWrite?(cb(p), op == 0xE6 ? r[0] & 0xFF : r[0]); p += 1
             case 0xEC, 0xED, 0xE4, 0xE5:           // in: 3DAh toggles bit 3 (retrace), else 0
                 let port = op >= 0xEC ? Int(r[2]) : cb(p)
                 if op < 0xEC { p += 1 }
@@ -886,5 +891,48 @@ public final class MiniX86 {
         default:
             return true
         }
+    }
+}
+
+// MARK: - Save states (Replay/SimulationSnapshot.swift)
+
+extension MiniX86 {
+    /// Registers, flags, the private stack segment (rule code can read stale stack words), the 3DAh
+    /// retrace toggle and the run bookkeeping. Between frames no run is active.
+    public struct State {
+        var r: [UInt16], es: UInt16
+        var flags: [Bool]
+        var ss: [UInt8]
+        var depth: Int, runDepth: Int
+        var frames: [(ret: Int, sp: UInt16, far: Bool)]
+        var stopIP: Int?, stops: [Bool]?, stopAtEpilogue: Bool
+        var lastStop: Int?, watch: Range<Int>?, watchHit: Bool
+        var forcedReturns: Int, executed: Int
+        var dsSeg: UInt16
+        var contactColour: UInt8
+        var retraceBit: Bool
+        var fault: Bool
+    }
+
+    public func saveState() -> State {
+        State(r: r, es: es, flags: [cf, zf, sf, of, pf, af, df], ss: ss, depth: depth, runDepth: runDepth, frames: frames,
+              stopIP: stopIP, stops: stops, stopAtEpilogue: stopAtEpilogue, lastStop: lastStop, watch: watch, watchHit: watchHit,
+              forcedReturns: forcedReturns, executed: executed, dsSeg: dsSeg, contactColour: contactColour,
+              retraceBit: retraceBit, fault: fault)
+    }
+
+    public func restoreState(_ s: State) {
+        r = s.r; es = s.es
+        cf = s.flags[0]; zf = s.flags[1]; sf = s.flags[2]; of = s.flags[3]; pf = s.flags[4]; af = s.flags[5]; df = s.flags[6]
+        ss = s.ss; depth = s.depth; runDepth = s.runDepth; frames = s.frames
+        stopIP = s.stopIP; stops = s.stops; stopAtEpilogue = s.stopAtEpilogue
+        lastStop = s.lastStop; watch = s.watch; watchHit = s.watchHit
+        forcedReturns = s.forcedReturns; executed = s.executed; dsSeg = s.dsSeg
+        contactColour = s.contactColour; retraceBit = s.retraceBit; fault = s.fault
+    }
+
+    func digest(into h: inout StateHasher) {
+        for v in r { h.add(v) }
+        h.add(es); h.add(dsSeg); h.add(retraceBit); h.add(ss)
     }
 }

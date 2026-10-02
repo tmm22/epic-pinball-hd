@@ -41,11 +41,21 @@ public final class ClassicComposer {
     private var lampShown: [Bool?]
     private var flipperShown: [Int: Int] = [:]
     private var plungerShown: Int?
+    /// Sprite-set records in VRAM (routine -> selector of the last blit since the last reset).
+    private var spriteSetDrawn: [Int: Int] = [:]
+    /// What VRAM should hold (`PresentationState.spriteSetsShown`; nil = not tracked by the producer).
+    public var spriteSetsWanted: [SpriteSetEvent]?
     private var lastStripKey: StripKey?
     private var lastOverlayKey: [Int] = []
 
     /// Flipper sprite frames by `EngineData.flippers` index (resolved by name from graphics).
     public let flipperFrames: [[IndexedSprite]?]
+    /// engine.json's flippers (the enhanced renderer's `FlipperArt` starts from their outlines).
+    public let flipperData: [EngineData.Flipper]
+    /// Sprite-set routines' records (EP8's robot, `SpriteSetGraphics`), by routine entry, and the same
+    /// records by name for the HD replay (`VRAMOp.blit` names that are not in `graphics.byName`).
+    public let spriteSets: [Int: SpriteSetGraphics]
+    public let extraSprites: [String: IndexedSprite]
 
     // MARK: enhanced-renderer bookkeeping (never changes what is drawn into `vram`/`strip`)
 
@@ -108,6 +118,10 @@ public final class ClassicComposer {
         self.occludes = engine.map { Self.occlusionClasses($0.occlusion) }
         self.overlay = [UInt8](repeating: 0, count: TableGeometry.width * Self.overlayRows)
         self.lampShown = Array(repeating: nil, count: graphics.lampCount)
+        self.flipperData = engine?.flippers ?? []
+        let sets = exe.map { SpriteSetGraphics.load(exe: $0, codeSegment: graphics.codeSegment) } ?? []
+        self.spriteSets = Dictionary(sets.map { ($0.routine.entry, $0) }, uniquingKeysWith: { a, _ in a })
+        self.extraSprites = Dictionary(sets.flatMap { $0.on + $0.off }.map { ($0.name, $0) }, uniquingKeysWith: { a, _ in a })
         self.flipperFrames = (engine?.flippers ?? []).map { f -> [IndexedSprite]? in
             guard let s = f.sprite else { return nil }
             let frames = s.frames.compactMap { graphics.byName[($0 as NSString).deletingPathExtension] }
@@ -165,6 +179,7 @@ public final class ClassicComposer {
         lampShown = Array(repeating: nil, count: graphics.lampCount)
         flipperShown = [:]
         plungerShown = nil
+        spriteSetDrawn = [:]
         markDirty(0, height)
     }
 
@@ -178,6 +193,7 @@ public final class ClassicComposer {
             if lampShown.contains(where: { $0 != nil }) {
                 let f = flipperShown, p = plungerShown
                 reset()
+                syncSpriteSets()
                 for (i, fr) in f { setFlipper(i, frame: fr, force: true) }
                 if let p { setPlunger(y: p) }
             }
@@ -195,6 +211,7 @@ public final class ClassicComposer {
         if back {
             let f = flipperShown, p = plungerShown
             reset()
+            syncSpriteSets()   // the robot set stays in VRAM in the original (rule code draws it before lamp_update)
             for k in 0..<n where drawn[k] != 0 { blitLamp(k, a: drawn[k] == 1) }
             for (i, fr) in f { setFlipper(i, frame: fr, force: true) }
             if let p { plungerShown = nil; setPlunger(y: p) }
@@ -206,6 +223,30 @@ public final class ClassicComposer {
     private func blitLamp(_ k: Int, a: Bool) {
         lampShown[k] = a
         if let s = a ? graphics.lampA[k] : graphics.lampB[k], Self.blitterAccepts(s) { blit(s) }
+    }
+
+    /// A sprite-set routine call (EP8 cs:A42F): its "on" records for selector 1, else the "off" ones,
+    /// opaque into VRAM in table order (the routine draws both pages; VRAM here is the page shown).
+    public func applySpriteSet(_ e: SpriteSetEvent) {
+        guard let g = spriteSets[e.routine] else { return }
+        for s in e.selector == 1 ? g.on : g.off { blit(s) }
+        spriteSetDrawn[e.routine] = e.selector
+    }
+
+    /// Brings VRAM to `spriteSetsWanted` (after a reset, or after a state load changed what the rules hold):
+    /// each routine's last call is drawn again; a routine VRAM shows but the rules have not called since boot
+    /// gets its "off" records, which are the playfield's own pixels (EP8: `SpriteSetTests`).
+    public func syncSpriteSets() {
+        guard let want = spriteSetsWanted else { return }
+        var w: [Int: Int] = [:]
+        for e in want { w[e.routine] = e.selector }
+        for (r, sel) in w.sorted(by: { $0.key < $1.key }) where spriteSetDrawn[r] != sel {
+            applySpriteSet(SpriteSetEvent(routine: r, selector: sel))
+        }
+        for r in spriteSetDrawn.keys.sorted() where w[r] == nil {
+            if spriteSetDrawn[r] != 0 { applySpriteSet(SpriteSetEvent(routine: r, selector: 0)) }
+            spriteSetDrawn[r] = nil
+        }
     }
 
     /// blit_list refuses records with w4 > 30 or h > 100 (cs:472F).
@@ -242,8 +283,14 @@ public final class ClassicComposer {
         var score: UInt32, ball: Int, player: Int, tilted: Bool, paused: Bool, dots: [Int], colours: [UInt8]
     }
 
-    /// All dots of a message (main text in DAC 255, appended lines in their colour).
+    /// All dots of a message (main text in DAC 255, appended lines in their colour), or the animated
+    /// ones (`DotMessage.liveDots`).
     func messageDots(_ m: DotMessage) -> (dots: [Int], colours: [UInt8]) {
+        if let live = m.liveDots {
+            // Animated by render_frame's effects: EP1-8 plot DAC 255, EP9-13 each dot's colour byte.
+            let c = spec.messagesInStrip ? m.liveColours : nil
+            return (live, c ?? [UInt8](repeating: 255, count: live.count))
+        }
         var d = DotText.dots(m, font8: graphics.font8, font5: graphics.font5, font5b: graphics.font5b)
         let main = spec.messagesInStrip ? (m.colour ?? spec.messageDotColour) : 255
         var c = [UInt8](repeating: main, count: d.count)
@@ -346,6 +393,12 @@ public final class ClassicComposer {
             for y in 1...min(spec.clearRows, Self.stripBufferRows - 1) {
                 for x in 0..<min(width, spec.clearWidth) { strip[y * width + x] = spec.clearColour }
             }
+        }
+        // EP9-13: render_frame's own clear before the dots (EP10 cs:3F07), every frame a message (the
+        // idle display included) is plotted.
+        if dmd, let b = spec.dotBorder {
+            for x in 0..<width { strip[x] = b }
+            if let f = spec.dotFill { for i in width..<min(strip.count, 30 * width) { strip[i] = f } }
         }
 
         stripBackground = strip

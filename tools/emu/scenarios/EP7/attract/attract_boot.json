@@ -1,0 +1,13 @@
+{
+ "name": "attract_boot",
+ "table": 7,
+ "frames": 900,
+ "start": "boot",
+ "mode": "full",
+ "on_drain": "continue",
+ "pokes": {
+  "demo_mode": 1
+ },
+ "description": "The demo as PINBALL.EXE starts it: players 'D' on the command line, from the first main-loop arrival after the boot (flippers at their boot angle, the EXE's ball slots).",
+ "inputs": []
+}

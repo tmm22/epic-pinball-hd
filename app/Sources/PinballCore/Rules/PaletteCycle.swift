@@ -16,8 +16,10 @@ import Foundation
 /// mov cx,300h; mov al,0; rep stosb; lea si,[B]`) fills from the base palette B (>> 2), and cs:3613
 /// reloads the ring from a per-level colour set (a lifted `call`). The main loop calls the routine
 /// once per frame (EP8 cs:0843); the frame-wait routine (EP8 cs:0240: `push ds; pusha; call cycle;
-/// ...; vsync wait`) calls it too, which rule code uses as a delay. [H] for the code shape, checked
-/// against the emulator (the ring after boot equals base >> 2; tools/emu, scratch/integrate).
+/// ...; vsync wait`) calls it too, which rule code uses as a delay. [H] for the code shape. The boot's
+/// fade-in and intro scroll call the frame wait too, so the ring after boot is a rotated, partly faded-in
+/// ring, not base >> 2: `RulesRuntime.boot` takes it from `ScreenFade.boot` (checked against the harness,
+/// ScreenFadeTests); `bootRing` is the fallback where the fade routines are not found.
 public struct PaletteCycle: Sendable, Equatable {
     public var routine: Int
     /// The frame-wait routine that starts with a call to `routine` (nil if none).
@@ -82,7 +84,7 @@ public struct PaletteCycle: Sendable, Equatable {
         return nil
     }
 
-    /// The ring as the boot fade-in leaves it: base palette entries >> 2.
+    /// The ring as base palette entries >> 2 (fallback; the boot's real end state is `ScreenFade.boot`).
     func bootRing(_ m: RulesMachine) {
         guard let bp = base else { return }
         for k in 0..<ringBytes { m.write8(ring + k, m.read8(bp + 3 * firstIndex + k) >> 2) }

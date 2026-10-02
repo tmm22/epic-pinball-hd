@@ -1,0 +1,21 @@
+{
+ "name": "attract_serve",
+ "table": 8,
+ "frames": 900,
+ "ball": {
+  "x": 148,
+  "y": 396,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0,
+  "active": 0
+ },
+ "mode": "full",
+ "on_drain": "continue",
+ "pokes": {
+  "demo_mode": 1
+ },
+ "description": "Demo mode from the serve position: the demo plunges (EP1 releases past 700, cs:0B79; the other tables hold the plunger at its maximum and the ball stays in the lane), auto-flips and nudges.",
+ "inputs": []
+}

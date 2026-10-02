@@ -497,6 +497,36 @@ class EpEmu:
         self._prep_regs()
         self._run(self.cs, self.A['main_loop'], self.A['frame_sync'], limit)
 
+    def render_after_steps(self):
+        """EP9-EP13 call render_frame after frame_sync's physics steps (EP10 cs:1238 `call 38E1h`, after the
+        retrace wait cs:11F0 and the steps cs:1210..1229), outside the main-loop body main_loop_full runs; EP1-EP8
+        call it inside the body (EP1 cs:1236).  Returns render_frame's entry for the first kind, else None.
+        render_frame is found by its shape (`cmp word [counter],0; jne +3; jmp; cmp byte [effect],1`, the counter
+        from dmd_message's `mov word [counter],1; mov al,0FFh; mov dx,3C8h`)."""
+        if not hasattr(self, '_render_after'):
+            import re
+            import struct as st
+            code = bytes(self.uc.mem_read(self.lin(self.cs, 0), 0x10000))
+            self._render_after = None
+            m = re.search(rb'\xc7\x06(..)\x01\x00\xb0\xff\xba\xc8\x03\xee\x42', code, re.S)
+            if m:
+                rf = re.search(rb'\x83\x3e' + re.escape(m.group(1)) + rb'\x00\x75\x03\xe9..\x80\x3e..\x01', code, re.S)
+                fs = self.A['frame_sync']
+                if rf:
+                    for x in range(fs, fs + 0x80):
+                        t = (x + 3 + st.unpack_from('<h', code, x + 1)[0]) & 0xFFFF
+                        if code[x] == 0xE8 and (t == rf.start() or (t == rf.start() - 1 and code[t] == 0x06)):   # EP10 cs:38E1 push es
+                            self._render_after = t
+                            break
+        return self._render_after
+
+    def post_frame(self, limit=50_000_000):
+        """What the real frame does after the physics steps that main_loop_full leaves out: EP9-EP13's
+        render_frame call (render_after_steps).  No-op on EP1-EP8."""
+        r = self.render_after_steps()
+        if r is not None:
+            self.call_near(r, limit)
+
     def physics_step(self, limit=1_000_000):
         """One call of cs:1724 (what the timer ISR does on each of its 3 ticks per frame).
 

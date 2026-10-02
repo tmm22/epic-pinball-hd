@@ -1,0 +1,29 @@
+{
+ "name": "demo_drop_right",
+ "table": 3,
+ "ball": {
+  "x": 193,
+  "y": 330,
+  "xf": 0,
+  "yf": 0,
+  "vx": 0,
+  "vy": 0
+ },
+ "frames": 1200,
+ "inputs": [],
+ "pokes": {
+  "demo_mode": 1
+ },
+ "mode": "full",
+ "on_drain": "continue",
+ "watch": {
+  "ds": [
+   [
+    "0x0328",
+    2
+   ]
+  ],
+  "messages": true
+ },
+ "description": "Ball 0 dropped onto the resting right flipper in demo mode; drains are served (on_drain continue): ball-end chain, between-balls display, messages and counter."
+}

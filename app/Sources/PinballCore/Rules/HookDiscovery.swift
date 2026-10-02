@@ -23,6 +23,12 @@ public struct DiscoveredHook: Sendable, Equatable {
     public var kind: String?
     public var when: String?
     public var continues: [Int: String] = [:]
+    /// `ball_end` hooks: the cuts of the straight-line regions passed between a cut and the hook in
+    /// `continues` (rules.json `via`; `HookDiscovery.regionVia`).
+    public var via: [Int: [Int]] = [:]
+    /// `ball_end` hooks: the instructions of the region (the direct backend's view of which code the
+    /// end-of-ball hooks cover; the lifted program has blocks there).
+    public var code: Set<Int> = []
 }
 
 struct Reach {
@@ -106,6 +112,8 @@ public struct HookDiscovery: Sendable {
     /// Near routines rule code runs as subroutines.
     public var subs = Set<Int>()
     public var dropped: [String] = []
+    /// Dropped `ball_end` regions (rules.json `native_hooks`): run from the EXE by both backends.
+    public var nativeHooks: [String: DiscoveredHook] = [:]
     public var notes: [String] = []
 
     static let callRolesOK = ["message", "text", "number_text", "score_refresh", "sound_play"]
@@ -174,6 +182,7 @@ public struct HookDiscovery: Sendable {
             break
         }
         out.dropped = drop.sorted()
+        for n in drop { if let h = auto[n], h.when == "ball_end" { out.nativeHooks[n] = h } }
         return out
     }
 
@@ -398,7 +407,23 @@ public struct HookDiscovery: Sendable {
         return (0..<(cuts.count - 1)).map { (cuts[$0], cuts[$0 + 1]) }
     }
 
-    struct Region { var start: Int; var cuts: [Int]; var seen: Set<Int>; var stackOK: Bool }
+    struct Region { var start: Int; var cuts: [Int]; var seen: Set<Int>; var stackOK: Bool; var straight: Bool }
+
+    /// Whether a..b (following rule-like near calls) calls the dot-matrix message routine (rules.py
+    /// `_calls_message`): such a main-loop statement is rule code even if it writes nothing rule code
+    /// reads, since the message is what the player sees (EP2 cs:04AB..0530, a message every 280 frames
+    /// until the first plunger release).
+    static func callsMessage(_ d: RulesDiscovery, _ L: inout Reach, _ a: Int, _ b: Int, _ seen: inout Set<Int>) -> Bool {
+        for i in X86Decoder.linear(d.code, a, b) where i.mn == "call" {
+            guard let t = i.target else { continue }
+            if L.routines[t] == "message" { return true }
+            if !seen.contains(t), L.ruleLike(t) {
+                seen.insert(t)
+                if callsMessage(d, &L, t, routineEnd(d, t), &seen) { return true }
+            }
+        }
+        return false
+    }
 
     static func regions(_ d: RulesDiscovery, _ L: inout Reach, _ entry: Int, _ end: Int) -> [Region] {
         var out: [Region] = [], todo = [entry], done = Set<Int>()
@@ -410,7 +435,7 @@ public struct HookDiscovery: Sendable {
             while var x = work.popLast() {
                 while !seen.contains(x) && entry <= x && x < end {
                     guard let i = d.map.insn(x) else { break }
-                    if !insnOK(i, &L, d.image.entryCS).0 { cuts.insert(x); todo.append(x + i.length); break }
+                    if !insnOK(i, &L, d.image.entryCS).0 { cuts.insert(x); todo.append(cutNext(d, x)); break }
                     seen.insert(x)
                     let m = i.mn
                     if Reach.jcc.contains(m) || m == "loop" || m == "jcxz", let t = i.target { work.append(t) }
@@ -419,9 +444,41 @@ public struct HookDiscovery: Sendable {
                     x += i.length
                 }
             }
-            out.append(Region(start: r, cuts: cuts.sorted(), seen: seen, stackOK: stackOK(d, r, seen)))
+            let straight = !seen.contains { a in d.map.insn(a).map { Reach.jcc.contains($0.mn) || $0.mn == "loop" || $0.mn == "jcxz" } ?? false }
+            out.append(Region(start: r, cuts: cuts.sorted(), seen: seen, stackOK: stackOK(d, r, seen), straight: straight))
         }
         return out
+    }
+
+    /// Where the code after the cut at `c` goes on (rules.py `_cut_next`): the next instruction, or for
+    /// port I/O inside a loop (ball_lost_fade's palette fade, EP2 cs:35AE..35EE: DAC writes, `jne` back
+    /// to the loop head) the exit of that loop, so the code after the fade (EP2 cs:35F0, the
+    /// between-balls flag) is a region of its own rather than the loop's `pop ax` tail.
+    static func cutNext(_ d: RulesDiscovery, _ c: Int) -> Int {
+        guard let i = d.map.insn(c) else { return c + 1 }
+        let next = c + i.length
+        guard i.mn == "in" || i.mn == "out" else { return next }
+        var x = next, exit: Int?
+        while x < c + 0x60, let j = d.map.insn(x) {
+            if Reach.jcc.contains(j.mn) || j.mn == "loop", let t = j.target, t <= c { exit = x + j.length }
+            if ["jmp", "ret", "retf", "iret", "call", "lcall"].contains(j.mn) { break }
+            x += j.length
+        }
+        return exit ?? next
+    }
+
+    /// From the region start `nx` after a cut, the regions passed before the next kept one (rules.py
+    /// `_region_via`): straight-line regions with one cut and no kept code, such as EP2 cs:385F
+    /// (`lcall`) between the frame wait cs:385C and the hook cs:3864, or EP9 cs:2F39 (the second
+    /// dmd_idle_text call) after the frame wait cs:2F36. Returns the kept start and the cuts passed.
+    static func regionVia(_ d: RulesDiscovery, _ byStart: [Int: Region], _ kept: Set<Int>, _ nx0: Int) -> (Int, [Int])? {
+        var nx = nx0, via: [Int] = [], seen = Set<Int>()
+        while !kept.contains(nx) {
+            guard let r = byStart[nx], seen.insert(nx).inserted, r.straight, r.cuts.count == 1 else { return nil }
+            via.append(r.cuts[0])
+            nx = cutNext(d, r.cuts[0])
+        }
+        return (nx, via)
     }
 
     static func stackOK(_ d: RulesDiscovery, _ r: Int, _ seen: Set<Int>) -> Bool {
@@ -491,17 +548,23 @@ public struct HookDiscovery: Sendable {
         let stmts = statements(d, cfg.mainLoop, cfg.frameSync, exits: [cfg.mainLoop])
         struct Info { var a: Int; var b: Int; var st: String; var w: Set<Int>; var r: Set<Int>; var keys: Bool; var n: Int }
         var info: [Info] = []
+        var shows = Set<Int>()   // statements that call dmd_message (EP2 cs:04AB: the timed message)
         for (a, b) in stmts {
             if engineSpans.contains(where: { $0.0 <= a && a < $0.1 }) { info.append(Info(a: a, b: b, st: "engine", w: [], r: [], keys: false, n: 0)); continue }
             var seen = Set<Int>()
             let ci = codeInfo(d, &L0, a, b, &seen)
             let n = X86Decoder.linear(code, a, b).count
             info.append(Info(a: a, b: b, st: ci.ok ? "ok" : "bad", w: ci.w, r: ci.r, keys: ci.keys, n: n))
+            var seenM = Set<Int>()
+            if ci.ok, callsMessage(d, &L0, a, b, &seenM) { shows.insert(info.count - 1) }
         }
         // end of ball: regions of ball_lost_fade
         var regs: [(Region, Set<Int>, Set<Int>)] = []
+        var byStart: [Int: Region] = [:]
         if let blf = cfg.ballLostFade {
-            for rg in regions(d, &L0, blf, routineEnd(d, blf)) where rg.stackOK {
+            let all = regions(d, &L0, blf, routineEnd(d, blf))
+            for rg in all { byStart[rg.start] = rg }
+            for rg in all where rg.stackOK {
                 var W = Set<Int>(), Rd = Set<Int>()
                 for x in rg.seen {
                     guard let i = d.map.insn(x) else { continue }
@@ -518,7 +581,7 @@ public struct HookDiscovery: Sendable {
         var R = rule
         var sel = Set<Int>(), rsel = Set<Int>()
         for _ in 0..<6 {
-            for (k, x) in info.enumerated() where x.st == "ok" && !x.w.intersection(R).subtracting(sound).subtracting(engineOnly).isEmpty { sel.insert(k) }
+            for (k, x) in info.enumerated() where x.st == "ok" && (!x.w.intersection(R).subtracting(sound).subtracting(engineOnly).isEmpty || shows.contains(k)) { sel.insert(k) }
             for (k, rg) in regs.enumerated() where !rg.1.intersection(R).subtracting(sound).subtracting(engineOnly).isEmpty { rsel.insert(k) }
             var R2 = R
             for k in sel { R2.formUnion(info[k].r) }
@@ -570,14 +633,15 @@ public struct HookDiscovery: Sendable {
         let kept = Set(rsel.map { regs[$0].0.start })
         for k in rsel.sorted() {
             let rg = regs[k].0
-            var cont: [Int: String] = [:]
-            for c in rg.cuts {
-                guard let i = d.map.insn(c) else { continue }
-                let nx = c + i.length
-                if kept.contains(nx) { cont[c] = "ball_end_\(String(format: "%04x", nx))" }
+            var cont: [Int: String] = [:], via: [Int: [Int]] = [:]
+            for c in rg.cuts where d.map.insn(c) != nil {
+                guard let (nx, passed) = regionVia(d, byStart, kept, cutNext(d, c)) else { continue }
+                cont[c] = "ball_end_\(String(format: "%04x", nx))"
+                if !passed.isEmpty { via[c] = passed }
             }
             let name = "ball_end_\(String(format: "%04x", rg.start))"
-            hooks[name] = DiscoveredHook(name: name, entry: rg.start, stops: rg.cuts, kind: "ball_end", when: "ball_end", continues: cont)
+            hooks[name] = DiscoveredHook(name: name, entry: rg.start, stops: rg.cuts, kind: "ball_end", when: "ball_end",
+                                         continues: cont, via: via, code: rg.seen)
         }
         return hooks
     }
