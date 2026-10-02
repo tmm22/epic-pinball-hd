@@ -3,6 +3,7 @@ import Foundation
 import Observation
 import PinballCore
 import PinballImport
+import PinballRender
 
 /// Front-end state shared by the launcher, settings, import screen and the running game.
 @MainActor
@@ -217,6 +218,8 @@ final class AppModel {
     @ObservationIgnored private var hdPackCancel: CancelFlag?
     /// Called on the main actor when a generation job ends (smoke tests print it).
     @ObservationIgnored var onHDPacksFinished: ((HDPackState) -> Void)?
+    /// Progress reports received from the current/last job (tests: several can land in one run-loop turn).
+    @ObservationIgnored private(set) var hdPackProgressReports = 0
 
     var hdPackRunning: Bool { if case .running = hdPackState { return true }; return false }
 
@@ -230,6 +233,7 @@ final class AppModel {
         let flag = CancelFlag()
         hdPackCancel = flag
         hdPackState = .running(fraction: 0, message: "Starting…")
+        hdPackProgressReports = 0
         let outputRoot = AppPaths.hdPacksRoot
         let model = self
         Task.detached(priority: .userInitiated) {
@@ -238,7 +242,9 @@ final class AppModel {
             var made = 0
             do {
                 let r = try HDPackGeneration.run(tables: tables, dataRoot: dataRoot, outputRoot: outputRoot, scale: scale, progress: { f, m in
-                    Task { @MainActor in if model.hdPackRunning { model.hdPackState = .running(fraction: f, message: m) } }
+                    Task { @MainActor in
+                        if model.hdPackRunning { model.hdPackState = .running(fraction: f, message: m); if f > 0 { model.hdPackProgressReports += 1 } }
+                    }
                 }, isCancelled: { flag.isCancelled })
                 let secs = String(format: "%.1f s", Date().timeIntervalSince(started))
                 made = r.done.count
@@ -255,6 +261,7 @@ final class AppModel {
                 model.hdPackState = state
                 model.hdPackCancel = nil
                 model.hdPacksVersion += 1
+                HDPack.packsChanged()
                 if useWhenDone, madeCount > 0 { model.settings.game.useHDPack = true }
                 model.onHDPacksFinished?(state)
             }

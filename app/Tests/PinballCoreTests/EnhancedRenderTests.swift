@@ -376,6 +376,54 @@ final class EnhancedRenderTests: XCTestCase {
         XCTAssertEqual(Array(px2[0..<3]), [e0.r, e0.g, e0.b], "fallback: original pixel, nearest")
     }
 
+    /// A pack written while the table is running (Settings > Library) is picked up on the next
+    /// frame after `HDPack.packsChanged()`, instead of the renderer keeping its "none found" result
+    /// until the option is switched off and on.
+    func testHDPackMadeWhileRunningIsPickedUp() throws {
+        guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }
+        let assets = try synthAssets()
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("hdpack-late-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        setenv("EPIC_PINBALL_HDPACKS", tmp.path, 1)
+        // The per-user root would find packs the developer made for real tables.
+        HDPack.userPacksRootOverride = tmp.appendingPathComponent("user-none")
+        defer { unsetenv("EPIC_PINBALL_HDPACKS"); HDPack.userPacksRootOverride = nil }
+        let S = 2, W = 320 * S, H = 400 * S
+        let r = try PinballRenderer(device: device, assets: assets)
+        var st = RenderSettings(); st.useHDPack = true; st.filter = .nearest; st.scaling = .integer
+        r.settings = st
+        let scene = SceneState(viewTop: 0, viewHeight: 400, ball: nil, flippers: [])
+        _ = try r.renderOffscreen(scene: scene, width: W, height: H)
+        XCTAssertFalse(r.hdPackActive)
+        XCTAssertTrue(r.hdPackWarnings.contains { $0.contains("no HD pack") }, "\(r.hdPackWarnings)")
+
+        func writePack(red: UInt8) throws {
+            let dir = tmp.appendingPathComponent("EP1")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            var rgba = [UInt8](repeating: 255, count: W * H * 4)
+            for i in 0..<(W * H) { rgba[i * 4] = red }
+            try PNGWriter.write(rgba: rgba, width: W, height: H, to: dir.appendingPathComponent("playfield.png"))
+            let m: [String: Any] = ["format": "epic-pinball-hdpack", "version": 1, "table": 1, "scale": S,
+                                    "source": ["playfield_idx_sha256": HDPack.playfieldHash(assets.indices)], "playfield": "playfield.png"]
+            try JSONSerialization.data(withJSONObject: m).write(to: dir.appendingPathComponent("pack.json"))
+        }
+        try writePack(red: 10)
+        _ = try r.renderOffscreen(scene: scene, width: W, height: H)
+        XCTAssertFalse(r.hdPackActive, "no new lookup without packsChanged (one lookup, not one per frame)")
+        HDPack.packsChanged()
+        var px = try r.renderOffscreen(scene: scene, width: W, height: H)
+        XCTAssertTrue(r.hdPackActive, "\(r.hdPackWarnings)")
+        XCTAssertFalse(r.hdPackWarnings.contains { $0.contains("no HD pack") }, "\(r.hdPackWarnings)")
+        XCTAssertEqual(px[0], 10)
+        // A pack regenerated while in use replaces the loaded one.
+        try writePack(red: 90)
+        HDPack.packsChanged()
+        px = try r.renderOffscreen(scene: scene, width: W, height: H)
+        XCTAssertTrue(r.hdPackActive)
+        XCTAssertEqual(px[0], 90)
+    }
+
     /// Lighting brightens lit lamps' surroundings and is off in classic settings.
     func testLightingGlowAroundLitLamp() throws {
         guard let device = MTLCreateSystemDefaultDevice() else { throw XCTSkip("no Metal device") }

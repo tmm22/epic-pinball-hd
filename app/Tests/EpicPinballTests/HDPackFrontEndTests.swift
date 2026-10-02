@@ -72,15 +72,13 @@ final class HDPackFrontEndTests: XCTestCase {
         XCTAssertEqual(HDPackGeneration.installedSummary(), "none")
         model.generateHDPacks(tables: [1], scale: 3)
         XCTAssertTrue(model.hdPackRunning)
-        var sawProgress = false
         let deadline = Date().addingTimeInterval(120)
         while model.hdPackRunning && Date() < deadline {
-            if case let .running(f, _) = model.hdPackState, f > 0 { sawProgress = true }
             RunLoop.main.run(until: Date().addingTimeInterval(0.01))
         }
         guard case let .finished(message) = model.hdPackState else { return XCTFail("\(model.hdPackState)") }
         XCTAssertTrue(message.hasPrefix("Made 1 3x pack"), message)
-        XCTAssertTrue(sawProgress)
+        XCTAssertGreaterThan(model.hdPackProgressReports, 0, "progress reported while running")
         XCTAssertEqual(model.hdPacksVersion, 1)
         XCTAssertEqual(HDPackGeneration.installedSummary(), "table 1 at 3×")
 

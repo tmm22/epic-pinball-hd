@@ -44,6 +44,12 @@ public struct HDPack: Sendable {
         }
     }
 
+    /// Bumped by `packsChanged()` whenever packs are written. A renderer that found no pack (or an
+    /// older one) for its table looks again on its next frame instead of keeping the old result.
+    nonisolated(unsafe) public private(set) static var installGeneration = 0
+    /// Call after writing packs (Settings > Library, the import-done offer). Main thread.
+    public static func packsChanged() { installGeneration &+= 1 }
+
     /// Replaces `userPacksRoot` (the app's `--support-dir`: `<dir>/HDPacks`). Set once at start-up.
     nonisolated(unsafe) public static var userPacksRootOverride: URL?
 
